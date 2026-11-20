@@ -292,6 +292,10 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   const addToCart = useCallback(
     (product: Product, size: string, color: string, quantity = 1) => {
+      if (product.product_type === 'aliexpress_affiliate') {
+        toast('AliExpress affiliate products are purchased directly on AliExpress.', 'info');
+        return;
+      }
       const avail = getVariantStock(product, size, color);
       if (avail <= 0 || product.status === 'Out of Stock') {
         toast('Selected size/color is currently out of stock.', 'error');

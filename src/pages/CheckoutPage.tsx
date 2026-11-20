@@ -83,7 +83,7 @@ export function CheckoutPage() {
   const detailedItems = cart
     .map((item) => {
       const product = products.find((p) => p.id === item.productId);
-      if (!product) return null;
+      if (!product || product.product_type === 'aliexpress_affiliate') return null;
       return { ...item, product };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -474,12 +474,12 @@ export function CheckoutPage() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-zinc-500 mb-1">Email Address *</label>
+                    <label className="block text-xs font-medium text-zinc-500 mb-1">Email Address (Optional)</label>
                     <input
                       type="email"
-                      required
                       value={customerEmail}
                       onChange={(e) => setCustomerEmail(e.target.value)}
+                      placeholder="Optional for order updates"
                       className="w-full px-3.5 py-2.5 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
                     />
                   </div>
@@ -794,7 +794,7 @@ export function CheckoutPage() {
                 <div className="space-y-1">
                   <p className="text-xs font-semibold text-zinc-500">Customer &amp; Delivery</p>
                   <p className="font-semibold text-zinc-950 dark:text-white">{customerName}</p>
-                  <p>{customerEmail}</p>
+                  {customerEmail && <p>{customerEmail}</p>}
                   <p className="font-mono text-xs">{customerPhone}{altPhone ? ` / ${altPhone}` : ''}</p>
                   <p className="text-zinc-600 dark:text-zinc-400">
                     {[

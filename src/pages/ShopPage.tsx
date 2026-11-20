@@ -16,6 +16,7 @@ export function ShopPage() {
   const [selectedSize, setSelectedSize] = useState('all');
   const [selectedColor, setSelectedColor] = useState('all');
   const [availability, setAvailability] = useState<'all' | 'in_stock' | 'special_offer'>('all');
+  const [productTypeFilter, setProductTypeFilter] = useState<'all' | 'direct' | 'aliexpress_affiliate'>('all');
   const [minRating, setMinRating] = useState<number>(0);
   const [minPrice, setMinPrice] = useState<string>('');
   const [maxPrice, setMaxPrice] = useState<string>('');
@@ -81,9 +82,12 @@ export function ShopPage() {
       list = list.filter((p) => p.colors.some((c) => c.name === selectedColor));
     }
     if (availability === 'in_stock') {
-      list = list.filter((p) => p.stock_quantity > 0 && p.status !== 'Out of Stock');
+      list = list.filter((p) => p.product_type !== 'aliexpress_affiliate' && p.stock_quantity > 0 && p.status !== 'Out of Stock');
     } else if (availability === 'special_offer') {
       list = list.filter((p) => p.is_special_offer || p.discount_percent > 0);
+    }
+    if (productTypeFilter !== 'all') {
+      list = list.filter((p) => (p.product_type || 'direct') === productTypeFilter);
     }
     if (minRating > 0) {
       list = list.filter((p) => p.rating >= minRating);
@@ -122,6 +126,7 @@ export function ShopPage() {
     selectedSize,
     selectedColor,
     availability,
+    productTypeFilter,
     minRating,
     minPrice,
     maxPrice,
@@ -139,6 +144,7 @@ export function ShopPage() {
     setSelectedSize('all');
     setSelectedColor('all');
     setAvailability('all');
+    setProductTypeFilter('all');
     setMinRating(0);
     setMinPrice('');
     setMaxPrice('');
@@ -156,6 +162,34 @@ export function ShopPage() {
         >
           Reset all
         </button>
+      </div>
+
+      {/* Product Source / Business Model */}
+      <div className="space-y-2 border-t border-zinc-200 dark:border-zinc-800 pt-4">
+        <p className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">Store Model</p>
+        <div className="space-y-1">
+          {[
+            { id: 'all', label: 'All Products' },
+            { id: 'direct', label: 'Direct Store (Local Delivery)' },
+            { id: 'aliexpress_affiliate', label: 'AliExpress Affiliate' },
+          ].map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => {
+                setProductTypeFilter(opt.id as typeof productTypeFilter);
+                setPage(1);
+              }}
+              className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium ${
+                productTypeFilter === opt.id
+                  ? 'bg-[#0F6E56]/10 dark:bg-[#14B8A6]/15 text-[#0F6E56] dark:text-[#14B8A6]'
+                  : 'text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800/60'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Category */}

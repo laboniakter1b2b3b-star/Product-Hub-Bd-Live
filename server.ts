@@ -161,6 +161,16 @@ function hydrateProduct(row: Record<string, unknown>) {
     is_featured: Boolean(row.is_featured),
     is_bestseller: Boolean(row.is_bestseller),
     is_special_offer: Boolean(row.is_special_offer),
+    product_type:
+      row.product_type === 'aliexpress_affiliate' ? ('aliexpress_affiliate' as const) : ('direct' as const),
+    affiliate_url: String(row.affiliate_url || ''),
+    affiliate_clicks: Number(row.affiliate_clicks || 0),
+    affiliate_commission_rate:
+      row.affiliate_commission_rate !== null && row.affiliate_commission_rate !== undefined
+        ? Number(row.affiliate_commission_rate)
+        : null,
+    affiliate_reported_orders: Number(row.affiliate_reported_orders || 0),
+    affiliate_reported_commission: Number(row.affiliate_reported_commission || 0),
     sales_count: Number(row.sales_count || 0),
     views_count: Number(row.views_count || 0),
     rating: Number(reviewStats.avg_rating.toFixed(1)),
@@ -170,10 +180,13 @@ function hydrateProduct(row: Record<string, unknown>) {
   };
 }
 
-function getSettingsMap(): Record<string, string> {
+const PRIVATE_SETTING_KEYS = new Set(['aliexpress_app_key']);
+
+function getSettingsMap(includePrivate = true): Record<string, string> {
   const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
   const map: Record<string, string> = {};
   for (const r of rows) {
+    if (!includePrivate && PRIVATE_SETTING_KEYS.has(r.key)) continue;
     map[r.key] = r.value;
   }
   return map;
@@ -597,7 +610,107 @@ app.post('/api/upload-video', (req: Request, res: Response) => {
 // ==========================================
 
 app.get('/api/settings', (_req: Request, res: Response) => {
-  res.json(getSettingsMap());
+  res.json(getSettingsMap(false));
+});
+
+app.get('/api/admin/settings', requireAdmin, (_req: AuthedRequest, res: Response) => {
+  res.json(getSettingsMap(true));
+});
+
+async function translateSingleText(text: string, target: 'bn' | 'en'): Promise<string> {
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${target}&dt=t&q=${encodeURIComponent(
+      text
+    )}`;
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(5000),
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+      },
+    });
+    if (!response.ok) return text;
+    const data = (await response.json()) as unknown;
+    if (!Array.isArray(data) || !Array.isArray(data[0])) return text;
+    const translated = (data[0] as unknown[])
+      .map((seg) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
+      .join('')
+      .trim();
+    return translated || text;
+  } catch {
+    return text;
+  }
+}
+
+app.post('/api/translate', async (req: Request, res: Response) => {
+  const target = req.body?.target === 'bn' ? 'bn' : req.body?.target === 'en' ? 'en' : null;
+  const rawTexts = Array.isArray(req.body?.texts) ? req.body.texts : [];
+
+  if (!target) {
+    res.status(400).json({ error: 'Invalid target language' });
+    return;
+  }
+
+  const uniqueTexts: string[] = [];
+  const seen = new Set<string>();
+  for (const item of rawTexts) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed || trimmed.length > 2000) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    uniqueTexts.push(trimmed);
+    if (uniqueTexts.length >= 60) break;
+  }
+
+  const translations: Record<string, string> = {};
+  const missing: { text: string; key: string }[] = [];
+
+  const getStmt = db.prepare('SELECT translated_text FROM translation_cache WHERE cache_key = ?');
+  for (const text of uniqueTexts) {
+    // Skip if already in target script
+    const hasBangla = /[\u0980-\u09FF]/.test(text);
+    const hasLatin = /[A-Za-z]/.test(text);
+    if (target === 'en' && !hasBangla) {
+      translations[text] = text;
+      continue;
+    }
+    if (target === 'bn' && !hasLatin) {
+      translations[text] = text;
+      continue;
+    }
+
+    const cacheKey = crypto.createHash('sha256').update(`${target}:${text}`).digest('hex');
+    const cached = getStmt.get(cacheKey) as { translated_text: string } | undefined;
+    if (cached?.translated_text) {
+      translations[text] = cached.translated_text;
+    } else {
+      missing.push({ text, key: cacheKey });
+    }
+  }
+
+  if (missing.length > 0) {
+    const insertStmt = db.prepare(
+      'INSERT OR REPLACE INTO translation_cache (cache_key, target_lang, source_text, translated_text) VALUES (?, ?, ?, ?)'
+    );
+    const concurrency = 6;
+    for (let i = 0; i < missing.length; i += concurrency) {
+      const chunk = missing.slice(i, i + concurrency);
+      const results = await Promise.all(
+        chunk.map(async ({ text, key }) => {
+          const out = await translateSingleText(text, target);
+          return { text, key, out };
+        })
+      );
+      for (const { text, key, out } of results) {
+        translations[text] = out;
+        if (out && out !== text) {
+          insertStmt.run(key, target, text, out);
+        }
+      }
+    }
+  }
+
+  res.json({ translations });
 });
 
 app.get('/api/categories', (_req: Request, res: Response) => {
@@ -757,6 +870,53 @@ app.get('/api/products/:id', (req: Request, res: Response) => {
     reviews,
     related: relatedRows.map(hydrateProduct),
   });
+});
+
+app.post('/api/products/:id/affiliate-click', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  if (!row || row.status === 'Draft') {
+    res.status(404).json({ error: 'Affiliate product not found' });
+    return;
+  }
+  if (row.product_type !== 'aliexpress_affiliate' || !String(row.affiliate_url || '').trim()) {
+    res.status(400).json({ error: 'This product does not have an active AliExpress affiliate link.' });
+    return;
+  }
+  const affiliateUrl = String(row.affiliate_url).trim();
+  const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.slice(0, 120) : '';
+  const referrerPage = typeof req.body?.referrerPage === 'string' ? req.body.referrerPage.slice(0, 200) : '';
+
+  db.prepare(
+    `INSERT INTO affiliate_clicks (product_id, product_name, sku, affiliate_url, session_id, referrer_page)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(id, String(row.name), String(row.sku), affiliateUrl, sessionId, referrerPage);
+
+  db.prepare('UPDATE products SET affiliate_clicks = affiliate_clicks + 1 WHERE id = ?').run(id);
+  const updated = db.prepare('SELECT affiliate_clicks FROM products WHERE id = ?').get(id) as {
+    affiliate_clicks: number;
+  };
+  res.json({ affiliate_url: affiliateUrl, clicks: updated?.affiliate_clicks ?? 1 });
+});
+
+app.get('/api/affiliate/go/:id', (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  const row = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+  if (!row || row.status === 'Draft' || row.product_type !== 'aliexpress_affiliate') {
+    res.status(404).send('Affiliate link not found');
+    return;
+  }
+  const affiliateUrl = String(row.affiliate_url || '').trim();
+  if (!/^https?:\/\//i.test(affiliateUrl)) {
+    res.status(400).send('Invalid affiliate destination URL');
+    return;
+  }
+  db.prepare(
+    `INSERT INTO affiliate_clicks (product_id, product_name, sku, affiliate_url, session_id, referrer_page)
+     VALUES (?, ?, ?, ?, '', '/api/affiliate/go')`
+  ).run(id, String(row.name), String(row.sku), affiliateUrl);
+  db.prepare('UPDATE products SET affiliate_clicks = affiliate_clicks + 1 WHERE id = ?').run(id);
+  res.redirect(302, affiliateUrl);
 });
 
 app.post('/api/products/:id/reviews', (req: AuthedRequest, res: Response) => {
@@ -991,13 +1151,12 @@ app.post('/api/orders', (req: AuthedRequest, res: Response) => {
 
     if (
       !body.customer_name?.trim() ||
-      !body.customer_email?.trim() ||
       !body.customer_phone?.trim() ||
       !body.district?.trim() ||
       !body.area?.trim() ||
       !body.full_address?.trim()
     ) {
-      res.status(400).json({ error: 'Please complete all required customer and delivery address fields.' });
+      res.status(400).json({ error: 'Please complete all required customer name, mobile number, and delivery address fields.' });
       return;
     }
 
@@ -1054,6 +1213,11 @@ app.post('/api/orders', (req: AuthedRequest, res: Response) => {
           | undefined;
         if (!prodRow || prodRow.status === 'Draft') {
           throw new Error(`Product ID ${reqItem.productId} is unavailable.`);
+        }
+        if (prodRow.product_type === 'aliexpress_affiliate') {
+          throw new Error(
+            `"${prodRow.name}" is an AliExpress affiliate product and must be purchased directly on AliExpress.`
+          );
         }
         const prod = hydrateProduct(prodRow);
         const variantKey = `${reqItem.size || ''}|${reqItem.color || ''}`;
@@ -1178,7 +1342,7 @@ app.post('/api/orders', (req: AuthedRequest, res: Response) => {
         orderId,
         req.user?.id || null,
         body.customer_name!.trim(),
-        body.customer_email!.trim().toLowerCase(),
+        (body.customer_email || req.user?.email || '').trim().toLowerCase(),
         body.customer_phone!.trim(),
         (body.alt_phone || '').trim(),
         (body.country || 'Bangladesh').trim(),
@@ -1248,11 +1412,17 @@ app.get('/api/orders/track/:orderId', (req: Request, res: Response) => {
     res.status(404).json({ error: 'Order ID not found. Please check your receipt.' });
     return;
   }
+  const maskName = (raw: string) =>
+    raw
+      .trim()
+      .split(/\s+/)
+      .map((part) => (part.length <= 1 ? part : `${part[0]}${'*'.repeat(Math.min(4, part.length - 1))}`))
+      .join(' ');
   res.json({
     order_id: row.order_id,
-    customer_name: row.customer_name,
+    customer_name: maskName(String(row.customer_name || '')),
     district: row.district,
-    area: row.area,
+    area: '',
     items: safeJsonParse(row.items as string, []),
     subtotal: row.subtotal,
     discount_amount: row.discount_amount,
@@ -1307,15 +1477,25 @@ app.get('/api/admin/dashboard', requireAdmin, (_req: AuthedRequest, res: Respons
     Returned: 0,
   };
 
+  let directProductSales = 0;
+  let discounts = 0;
+  let deliveryCollected = 0;
+  let taxCollected = 0;
   let totalSales = 0;
   let totalCogs = 0;
+  let orderActualDeliveryCosts = 0;
   let pendingPaymentsCount = 0;
 
   for (const o of orderRows) {
     const st = String(o.order_status);
     if (st in statusCounts) statusCounts[st]++;
     if (st !== 'Cancelled' && st !== 'Returned') {
+      directProductSales += Number(o.subtotal || 0);
+      discounts += Number(o.discount_amount || 0);
+      deliveryCollected += Number(o.delivery_charge || 0);
+      taxCollected += Number(o.tax_amount || 0);
       totalSales += Number(o.total_amount || 0);
+      orderActualDeliveryCosts += Number(o.actual_delivery_cost || 0);
       const items = safeJsonParse<{ costPrice?: number; quantity?: number }[]>(o.items as string, []);
       for (const it of items) {
         totalCogs += Number(it.costPrice || 0) * Number(it.quantity || 1);
@@ -1326,17 +1506,61 @@ app.get('/api/admin/dashboard', requireAdmin, (_req: AuthedRequest, res: Respons
     }
   }
 
-  const totalExpenses = (db.prepare('SELECT COALESCE(SUM(amount), 0) as s FROM expenses').get() as { s: number }).s;
-  const estimatedProfit = totalSales - totalCogs - totalExpenses;
+  const expenseRows = db.prepare('SELECT * FROM expenses').all() as { category?: string; amount?: number }[];
+  let courierExpenseTotal = 0;
+  let operationalExpenses = 0;
+  for (const ex of expenseRows) {
+    const amt = Number(ex.amount || 0);
+    const cat = String(ex.category || '').toLowerCase();
+    if (cat.includes('courier') || cat.includes('delivery') || cat.includes('shipping') || cat.includes('logistics')) {
+      courierExpenseTotal += amt;
+    } else {
+      operationalExpenses += amt;
+    }
+  }
+  const deliveryCosts = orderActualDeliveryCosts + courierExpenseTotal;
+  const totalExpenses = deliveryCosts + operationalExpenses;
+  const netProfit = totalSales - totalCogs - totalExpenses;
 
   const allProducts = db.prepare('SELECT * FROM products').all() as Record<string, unknown>[];
   const hydratedProducts = allProducts.map(hydrateProduct);
-  const lowStockProducts = hydratedProducts.filter(
+  const directProducts = hydratedProducts.filter((p) => p.product_type !== 'aliexpress_affiliate');
+  const affiliateProducts = hydratedProducts.filter((p) => p.product_type === 'aliexpress_affiliate');
+
+  const lowStockProducts = directProducts.filter(
     (p) => p.stock_quantity > 0 && p.stock_quantity <= p.low_stock_threshold
   );
-  const outOfStockProducts = hydratedProducts.filter(
+  const outOfStockProducts = directProducts.filter(
     (p) => p.stock_quantity === 0 || p.status === 'Out of Stock'
   );
+
+  // Separate AliExpress Affiliate Analytics (Never mixed with direct store sales)
+  const settingsMap = getSettingsMap(true);
+  const totalAffiliateClicks = (db.prepare('SELECT COUNT(*) as c FROM affiliate_clicks').get() as { c: number }).c;
+  const clicksToday = (
+    db
+      .prepare("SELECT COUNT(*) as c FROM affiliate_clicks WHERE date(created_at) = date('now')")
+      .get() as { c: number }
+  ).c;
+  const reportedAffiliateOrders = affiliateProducts.reduce((s, p) => s + p.affiliate_reported_orders, 0);
+  const reportedAffiliateCommissions = affiliateProducts.reduce((s, p) => s + p.affiliate_reported_commission, 0);
+  const topAffiliateProducts = [...affiliateProducts]
+    .sort((a, b) => b.affiliate_clicks - a.affiliate_clicks)
+    .slice(0, 8)
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      sku: p.sku,
+      affiliate_url: p.affiliate_url,
+      affiliate_clicks: p.affiliate_clicks,
+      affiliate_reported_orders: p.affiliate_reported_orders,
+      affiliate_reported_commission: p.affiliate_reported_commission,
+      effective_price: p.effective_price,
+      image: p.images[0] || '',
+    }));
+  const recentAffiliateClicks = db
+    .prepare('SELECT id, product_id, product_name, sku, created_at FROM affiliate_clicks ORDER BY id DESC LIMIT 12')
+    .all();
 
   // Daily (last 7 days), Weekly (last 4 weeks), Monthly (last 6 months), Yearly (last 3 years)
   const dailySeries = db
@@ -1386,7 +1610,7 @@ app.get('/api/admin/dashboard', requireAdmin, (_req: AuthedRequest, res: Respons
     )
     .all();
 
-  const topProducts = [...hydratedProducts]
+  const topProducts = [...directProducts]
     .sort((a, b) => b.sales_count - a.sales_count)
     .slice(0, 5)
     .map((p) => ({
@@ -1423,9 +1647,29 @@ app.get('/api/admin/dashboard', requireAdmin, (_req: AuthedRequest, res: Respons
     },
     financials: {
       totalSales,
+      directProductSales,
+      discounts,
+      deliveryCollected,
+      taxCollected,
+      totalRevenue: totalSales,
       totalCogs,
+      deliveryCosts,
+      operationalExpenses,
       totalExpenses,
-      estimatedProfit,
+      estimatedProfit: netProfit,
+      netProfit,
+    },
+    affiliate: {
+      accountConfigured: Boolean((settingsMap.aliexpress_tracking_id || '').trim()),
+      accountName: settingsMap.aliexpress_account_name || 'PRODUCT HUB BD AliExpress Affiliate',
+      trackingId: settingsMap.aliexpress_tracking_id || '',
+      totalAffiliateProducts: affiliateProducts.length,
+      totalClicks: totalAffiliateClicks,
+      clicksToday,
+      reportedOrders: reportedAffiliateOrders,
+      reportedCommissions: reportedAffiliateCommissions,
+      topProducts: topAffiliateProducts,
+      recentClicks: recentAffiliateClicks,
     },
     charts: {
       daily: dailySeries,
@@ -1476,13 +1720,39 @@ app.post('/api/admin/products', requireAdmin, (req: AuthedRequest, res: Response
       return;
     }
 
+    const productType =
+      b.product_type === 'aliexpress_affiliate' ? 'aliexpress_affiliate' : 'direct';
+    const affiliateUrl = String(b.affiliate_url || '').trim();
+    const affiliateCommissionRate =
+      b.affiliate_commission_rate !== null &&
+      b.affiliate_commission_rate !== '' &&
+      b.affiliate_commission_rate !== undefined
+        ? Number(b.affiliate_commission_rate)
+        : null;
+    const affiliateReportedOrders = Math.max(0, Math.floor(Number(b.affiliate_reported_orders) || 0));
+    const affiliateReportedCommission = Math.max(0, Number(b.affiliate_reported_commission) || 0);
+
+    if (productType === 'aliexpress_affiliate' && !/^https?:\/\//i.test(affiliateUrl)) {
+      res.status(400).json({ error: 'A valid AliExpress affiliate URL (starting with https://) is required.' });
+      return;
+    }
+
     const variantStock = (b.variant_stock as Record<string, number>) || {};
     const computedStock =
-      Object.keys(variantStock).length > 0
-        ? Object.values(variantStock).reduce((a, v) => a + Math.max(0, Number(v) || 0), 0)
-        : Math.max(0, Math.floor(Number(b.stock_quantity) || 0));
+      productType === 'aliexpress_affiliate'
+        ? Math.max(0, Math.floor(Number(b.stock_quantity) || 0))
+        : Object.keys(variantStock).length > 0
+          ? Object.values(variantStock).reduce((a, v) => a + Math.max(0, Number(v) || 0), 0)
+          : Math.max(0, Math.floor(Number(b.stock_quantity) || 0));
 
-    const status = computedStock === 0 && b.status === 'Active' ? 'Out of Stock' : String(b.status || 'Active');
+    const status =
+      productType === 'aliexpress_affiliate'
+        ? b.status === 'Draft'
+          ? 'Draft'
+          : 'Active'
+        : computedStock === 0 && b.status === 'Active'
+          ? 'Out of Stock'
+          : String(b.status || 'Active');
 
     const result = db
       .prepare(
@@ -1492,8 +1762,10 @@ app.post('/api/admin/products', requireAdmin, (req: AuthedRequest, res: Response
           images, video_url, sizes, colors, stock_quantity, variant_stock,
           low_stock_threshold, weight, material, pieces_info, warranty_info,
           specifications, features, tags, search_keywords, status,
-          is_featured, is_bestseller, is_special_offer
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          is_featured, is_bestseller, is_special_offer,
+          product_type, affiliate_url, affiliate_commission_rate,
+          affiliate_reported_orders, affiliate_reported_commission
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         productCode,
@@ -1504,7 +1776,7 @@ app.post('/api/admin/products', requireAdmin, (req: AuthedRequest, res: Response
         String(b.description || ''),
         regularPrice,
         salePrice,
-        Number(b.cost_price || 0),
+        productType === 'aliexpress_affiliate' ? 0 : Number(b.cost_price || 0),
         String(b.category || 'Apparel'),
         String(b.subcategory || ''),
         String(b.brand || 'PRODUCT HUB BD'),
@@ -1526,16 +1798,28 @@ app.post('/api/admin/products', requireAdmin, (req: AuthedRequest, res: Response
         status,
         b.is_featured ? 1 : 0,
         b.is_bestseller ? 1 : 0,
-        b.is_special_offer ? 1 : 0
+        b.is_special_offer ? 1 : 0,
+        productType,
+        affiliateUrl,
+        affiliateCommissionRate,
+        affiliateReportedOrders,
+        affiliateReportedCommission
       );
 
     const newId = Number(result.lastInsertRowid);
-    db.prepare(
-      `INSERT INTO stock_history (product_id, product_name, sku, change_amount, previous_stock, new_stock, variant_key, reason, admin_name)
-       VALUES (?, ?, ?, ?, 0, ?, 'ALL', 'Product Created', ?)`
-    ).run(newId, name, sku, computedStock, computedStock, req.user!.username || req.user!.name);
+    if (productType !== 'aliexpress_affiliate') {
+      db.prepare(
+        `INSERT INTO stock_history (product_id, product_name, sku, change_amount, previous_stock, new_stock, variant_key, reason, admin_name)
+         VALUES (?, ?, ?, ?, 0, ?, 'ALL', 'Product Created', ?)`
+      ).run(newId, name, sku, computedStock, computedStock, req.user!.username || req.user!.name);
+    }
 
-    logActivity(req.user!.username || req.user!.name, 'Created Product', sku, name);
+    logActivity(
+      req.user!.username || req.user!.name,
+      productType === 'aliexpress_affiliate' ? 'Created AliExpress Affiliate Product' : 'Created Product',
+      sku,
+      name
+    );
     const created = db.prepare('SELECT * FROM products WHERE id = ?').get(newId) as Record<string, unknown>;
     res.status(201).json(hydrateProduct(created));
   } catch (err) {
@@ -1591,22 +1875,60 @@ app.put('/api/admin/products/:id', requireAdmin, (req: AuthedRequest, res: Respo
       return;
     }
 
+    const nextProductType =
+      b.product_type !== undefined
+        ? b.product_type === 'aliexpress_affiliate'
+          ? 'aliexpress_affiliate'
+          : 'direct'
+        : existing.product_type === 'aliexpress_affiliate'
+          ? 'aliexpress_affiliate'
+          : 'direct';
+    const nextAffiliateUrl = String(b.affiliate_url ?? existing.affiliate_url ?? '').trim();
+    if (nextProductType === 'aliexpress_affiliate' && !/^https?:\/\//i.test(nextAffiliateUrl)) {
+      res.status(400).json({ error: 'A valid AliExpress affiliate URL (starting with https://) is required.' });
+      return;
+    }
+    const nextCommissionRate =
+      b.affiliate_commission_rate === undefined
+        ? existing.affiliate_commission_rate !== null && existing.affiliate_commission_rate !== undefined
+          ? Number(existing.affiliate_commission_rate)
+          : null
+        : b.affiliate_commission_rate === null || b.affiliate_commission_rate === ''
+          ? null
+          : Number(b.affiliate_commission_rate);
+    const nextReportedOrders =
+      b.affiliate_reported_orders !== undefined
+        ? Math.max(0, Math.floor(Number(b.affiliate_reported_orders) || 0))
+        : Number(existing.affiliate_reported_orders || 0);
+    const nextReportedCommission =
+      b.affiliate_reported_commission !== undefined
+        ? Math.max(0, Number(b.affiliate_reported_commission) || 0)
+        : Number(existing.affiliate_reported_commission || 0);
+
     const variantStock: Record<string, number> =
       b.variant_stock !== undefined
         ? (b.variant_stock as Record<string, number>)
         : safeJsonParse<Record<string, number>>(existing.variant_stock as string, {});
     const computedStock: number =
-      Object.keys(variantStock).length > 0
-        ? Object.values(variantStock).reduce<number>((a, v) => a + Math.max(0, Number(v) || 0), 0)
-        : Math.max(0, Math.floor(Number(b.stock_quantity ?? existing.stock_quantity)));
+      nextProductType === 'aliexpress_affiliate'
+        ? Math.max(0, Math.floor(Number(b.stock_quantity ?? existing.stock_quantity ?? 0)))
+        : Object.keys(variantStock).length > 0
+          ? Object.values(variantStock).reduce<number>((a, v) => a + Math.max(0, Number(v) || 0), 0)
+          : Math.max(0, Math.floor(Number(b.stock_quantity ?? existing.stock_quantity)));
 
     const prevStock = Number(existing.stock_quantity || 0);
     const nextStatus =
-      b.status === 'Draft'
-        ? 'Draft'
-        : computedStock === 0
-          ? 'Out of Stock'
-          : String(b.status || existing.status || 'Active');
+      nextProductType === 'aliexpress_affiliate'
+        ? b.status === 'Draft'
+          ? 'Draft'
+          : b.status === 'Active'
+            ? 'Active'
+            : String(existing.status === 'Draft' ? 'Draft' : 'Active')
+        : b.status === 'Draft'
+          ? 'Draft'
+          : computedStock === 0
+            ? 'Out of Stock'
+            : String(b.status || existing.status || 'Active');
 
     db.prepare(
       `UPDATE products SET
@@ -1615,7 +1937,10 @@ app.put('/api/admin/products/:id', requireAdmin, (req: AuthedRequest, res: Respo
         images = ?, video_url = ?, sizes = ?, colors = ?, stock_quantity = ?, variant_stock = ?,
         low_stock_threshold = ?, weight = ?, material = ?, pieces_info = ?, warranty_info = ?,
         specifications = ?, features = ?, tags = ?, search_keywords = ?, status = ?,
-        is_featured = ?, is_bestseller = ?, is_special_offer = ?, updated_at = datetime('now')
+        is_featured = ?, is_bestseller = ?, is_special_offer = ?,
+        product_type = ?, affiliate_url = ?, affiliate_commission_rate = ?,
+        affiliate_reported_orders = ?, affiliate_reported_commission = ?,
+        updated_at = datetime('now')
        WHERE id = ?`
     ).run(
       nextProductCode,
@@ -1626,7 +1951,7 @@ app.put('/api/admin/products/:id', requireAdmin, (req: AuthedRequest, res: Respo
       String(b.description ?? existing.description),
       regularPrice,
       salePrice,
-      Number(b.cost_price ?? existing.cost_price),
+      nextProductType === 'aliexpress_affiliate' ? 0 : Number(b.cost_price ?? existing.cost_price),
       String(b.category ?? existing.category),
       String(b.subcategory ?? existing.subcategory),
       String(b.brand ?? existing.brand),
@@ -1649,10 +1974,15 @@ app.put('/api/admin/products/:id', requireAdmin, (req: AuthedRequest, res: Respo
       b.is_featured !== undefined ? (b.is_featured ? 1 : 0) : existing.is_featured,
       b.is_bestseller !== undefined ? (b.is_bestseller ? 1 : 0) : existing.is_bestseller,
       b.is_special_offer !== undefined ? (b.is_special_offer ? 1 : 0) : existing.is_special_offer,
+      nextProductType,
+      nextAffiliateUrl,
+      nextCommissionRate,
+      nextReportedOrders,
+      nextReportedCommission,
       id
     );
 
-    if (computedStock !== prevStock) {
+    if (nextProductType !== 'aliexpress_affiliate' && computedStock !== prevStock) {
       db.prepare(
         `INSERT INTO stock_history (product_id, product_name, sku, change_amount, previous_stock, new_stock, variant_key, reason, admin_name)
          VALUES (?, ?, ?, ?, ?, ?, 'ALL', 'Product Edit Stock Sync', ?)`
@@ -1694,8 +2024,9 @@ app.post('/api/admin/products/:id/duplicate', requireAdmin, (req: AuthedRequest,
         images, video_url, sizes, colors, stock_quantity, variant_stock,
         low_stock_threshold, weight, material, pieces_info, warranty_info,
         specifications, features, tags, search_keywords, status,
-        is_featured, is_bestseller, is_special_offer
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', 0, 0, 0)`
+        is_featured, is_bestseller, is_special_offer,
+        product_type, affiliate_url, affiliate_commission_rate
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Draft', 0, 0, 0, ?, ?, ?)`
     )
     .run(
       newCode,
@@ -1724,7 +2055,10 @@ app.post('/api/admin/products/:id/duplicate', requireAdmin, (req: AuthedRequest,
       existing.specifications,
       existing.features,
       existing.tags,
-      existing.search_keywords
+      existing.search_keywords,
+      existing.product_type || 'direct',
+      existing.affiliate_url || '',
+      existing.affiliate_commission_rate ?? null
     );
   logActivity(req.user!.username || req.user!.name, 'Duplicated Product', newSku, `${existing.name}`);
   const created = db.prepare('SELECT * FROM products WHERE id = ?').get(result.lastInsertRowid) as Record<string, unknown>;
@@ -1979,18 +2313,23 @@ app.put('/api/admin/orders/:id', requireAdmin, (req: AuthedRequest, res: Respons
       res.status(404).json({ error: 'Order not found' });
       return;
     }
-    const { order_status, courier_name, tracking_number, refund_status, admin_note } = req.body as {
+    const { order_status, courier_name, tracking_number, refund_status, admin_note, actual_delivery_cost } = req.body as {
       order_status?: string;
       courier_name?: string;
       tracking_number?: string;
       refund_status?: string;
       admin_note?: string;
+      actual_delivery_cost?: number;
     };
 
     const prevStatus = String(existing.order_status);
     const nextStatus = order_status || prevStatus;
     const isRestoringStatus = nextStatus === 'Cancelled' || nextStatus === 'Returned';
     const wasRestoringStatus = prevStatus === 'Cancelled' || prevStatus === 'Returned';
+    const nextDeliveryCost =
+      actual_delivery_cost !== undefined && Number.isFinite(Number(actual_delivery_cost)) && Number(actual_delivery_cost) >= 0
+        ? Number(actual_delivery_cost)
+        : null;
 
     const updateTx = db.transaction(() => {
       db.prepare(
@@ -2000,6 +2339,7 @@ app.put('/api/admin/orders/:id', requireAdmin, (req: AuthedRequest, res: Respons
           tracking_number = COALESCE(?, tracking_number),
           refund_status = COALESCE(?, refund_status),
           admin_note = COALESCE(?, admin_note),
+          actual_delivery_cost = COALESCE(?, actual_delivery_cost),
           updated_at = datetime('now')
          WHERE id = ?`
       ).run(
@@ -2008,6 +2348,7 @@ app.put('/api/admin/orders/:id', requireAdmin, (req: AuthedRequest, res: Respons
         tracking_number ?? null,
         refund_status ?? null,
         admin_note ?? null,
+        nextDeliveryCost,
         id
       );
 
@@ -2217,23 +2558,44 @@ app.get('/api/admin/reports', requireAdmin, (req: AuthedRequest, res: Response) 
   const { from, to } = req.query as { from?: string; to?: string };
   let orders = db.prepare('SELECT * FROM orders ORDER BY id DESC').all() as Record<string, unknown>[];
   let expenses = db.prepare('SELECT * FROM expenses ORDER BY expense_date DESC').all() as Record<string, unknown>[];
+  let affiliateClicks = db.prepare('SELECT * FROM affiliate_clicks ORDER BY id DESC').all() as Record<string, unknown>[];
 
   if (from) {
     orders = orders.filter((o) => String(o.created_at).slice(0, 10) >= from);
     expenses = expenses.filter((e) => String(e.expense_date) >= from);
+    affiliateClicks = affiliateClicks.filter((c) => String(c.created_at).slice(0, 10) >= from);
   }
   if (to) {
     orders = orders.filter((o) => String(o.created_at).slice(0, 10) <= to);
     expenses = expenses.filter((e) => String(e.expense_date) <= to);
+    affiliateClicks = affiliateClicks.filter((c) => String(c.created_at).slice(0, 10) <= to);
   }
 
+  // Direct Store Financials (Strictly separated from AliExpress Affiliate)
   const validOrders = orders.filter((o) => o.order_status !== 'Cancelled' && o.order_status !== 'Returned');
+  const directProductSales = validOrders.reduce((a, o) => a + Number(o.subtotal || 0), 0);
+  const discounts = validOrders.reduce((a, o) => a + Number(o.discount_amount || 0), 0);
+  const deliveryCollected = validOrders.reduce((a, o) => a + Number(o.delivery_charge || 0), 0);
+  const taxCollected = validOrders.reduce((a, o) => a + Number(o.tax_amount || 0), 0);
   const revenue = validOrders.reduce((a, o) => a + Number(o.total_amount || 0), 0);
   const cogs = validOrders.reduce((acc, o) => {
     const items = safeJsonParse<{ costPrice?: number; quantity?: number }[]>(o.items as string, []);
     return acc + items.reduce((s, it) => s + Number(it.costPrice || 0) * Number(it.quantity || 1), 0);
   }, 0);
-  const expenseTotal = expenses.reduce((a, e) => a + Number(e.amount || 0), 0);
+  const orderActualDeliveryCosts = validOrders.reduce((a, o) => a + Number(o.actual_delivery_cost || 0), 0);
+  let courierExpenses = 0;
+  let operationalExpenses = 0;
+  for (const ex of expenses) {
+    const amt = Number(ex.amount || 0);
+    const cat = String(ex.category || '').toLowerCase();
+    if (cat.includes('courier') || cat.includes('delivery') || cat.includes('shipping') || cat.includes('logistics')) {
+      courierExpenses += amt;
+    } else {
+      operationalExpenses += amt;
+    }
+  }
+  const deliveryCosts = orderActualDeliveryCosts + courierExpenses;
+  const expenseTotal = deliveryCosts + operationalExpenses;
 
   const paymentBreakdown = {
     bKash: orders.filter((o) => o.payment_method === 'bKash').length,
@@ -2244,15 +2606,56 @@ app.get('/api/admin/reports', requireAdmin, (req: AuthedRequest, res: Response) 
     rejectedCount: orders.filter((o) => o.payment_status === 'Payment Rejected').length,
   };
 
+  // AliExpress Affiliate Report (Strictly separate)
+  const settingsMap = getSettingsMap(true);
+  const affiliateProducts = (
+    db.prepare("SELECT * FROM products WHERE product_type = 'aliexpress_affiliate' ORDER BY affiliate_clicks DESC").all() as Record<
+      string,
+      unknown
+    >[]
+  ).map(hydrateProduct);
+  const clickCountByProduct = new Map<number, number>();
+  for (const ck of affiliateClicks) {
+    const pid = Number(ck.product_id);
+    clickCountByProduct.set(pid, (clickCountByProduct.get(pid) || 0) + 1);
+  }
+
   res.json({
     summary: {
       totalOrders: orders.length,
       validOrders: validOrders.length,
       cancelledOrReturned: orders.length - validOrders.length,
+      directProductSales,
+      discounts,
+      deliveryCollected,
+      taxCollected,
       revenue,
       cogs,
+      deliveryCosts,
+      operationalExpenses,
       expenses: expenseTotal,
       netProfit: revenue - cogs - expenseTotal,
+    },
+    affiliateSummary: {
+      accountConfigured: Boolean((settingsMap.aliexpress_tracking_id || '').trim()),
+      accountName: settingsMap.aliexpress_account_name || 'PRODUCT HUB BD AliExpress Affiliate',
+      trackingId: settingsMap.aliexpress_tracking_id || '',
+      totalProducts: affiliateProducts.length,
+      clicksInRange: affiliateClicks.length,
+      totalAllTimeClicks: affiliateProducts.reduce((s, p) => s + p.affiliate_clicks, 0),
+      reportedOrders: affiliateProducts.reduce((s, p) => s + p.affiliate_reported_orders, 0),
+      reportedCommissions: affiliateProducts.reduce((s, p) => s + p.affiliate_reported_commission, 0),
+      products: affiliateProducts.map((p) => ({
+        id: p.id,
+        name: p.name,
+        sku: p.sku,
+        affiliate_url: p.affiliate_url,
+        clicksInRange: clickCountByProduct.get(p.id) || 0,
+        totalClicks: p.affiliate_clicks,
+        commissionRate: p.affiliate_commission_rate,
+        reportedOrders: p.affiliate_reported_orders,
+        reportedCommission: p.affiliate_reported_commission,
+      })),
     },
     paymentBreakdown,
     orders: orders.map((o) => ({ ...o, items: safeJsonParse(o.items as string, []) })),
@@ -2271,16 +2674,25 @@ app.put('/api/admin/settings', requireAdmin, (req: AuthedRequest, res: Response)
     'free_delivery_threshold',
     'tax_rate_percent',
   ]);
+  const booleanKeys = new Set(['cod_enabled', 'aliexpress_enabled']);
 
   const tx = db.transaction(() => {
     for (const [k, rawVal] of Object.entries(updates)) {
       if (rawVal === undefined || rawVal === null) continue;
       let val = String(rawVal);
-      if (k === 'cod_enabled') {
+      if (booleanKeys.has(k)) {
         val = val === 'true' ? 'true' : 'false';
       } else if (numericKeys.has(k)) {
         const num = Number(val);
         val = Number.isFinite(num) && num >= 0 ? String(num) : '0';
+      } else if (k === 'aliexpress_commission_rate') {
+        const trimmed = val.trim();
+        if (!trimmed) {
+          val = '';
+        } else {
+          const num = Number(trimmed);
+          val = Number.isFinite(num) && num >= 0 ? String(num) : '';
+        }
       } else {
         val = val.trim();
       }
@@ -2293,7 +2705,7 @@ app.put('/api/admin/settings', requireAdmin, (req: AuthedRequest, res: Response)
     'Updated Website Settings',
     `${Object.keys(updates).length} settings saved`
   );
-  res.json(getSettingsMap());
+  res.json(getSettingsMap(true));
 });
 
 app.get('/api/admin/activity-logs', requireAdmin, (_req: AuthedRequest, res: Response) => {
@@ -2321,7 +2733,8 @@ function buildStoreBackupSnapshot(exportedBy: string) {
   const visitors = db.prepare('SELECT * FROM visitors ORDER BY id DESC').all() as Record<string, unknown>[];
   const pageViews = db.prepare('SELECT * FROM page_views ORDER BY id DESC').all() as Record<string, unknown>[];
   const activityLogs = db.prepare('SELECT * FROM activity_logs ORDER BY id DESC').all() as Record<string, unknown>[];
-  const settingsMap = getSettingsMap();
+  const affiliateClicks = db.prepare('SELECT * FROM affiliate_clicks ORDER BY id DESC').all() as Record<string, unknown>[];
+  const settingsMap = getSettingsMap(true);
 
   return {
     exported_at: new Date().toISOString(),
@@ -2340,6 +2753,7 @@ function buildStoreBackupSnapshot(exportedBy: string) {
       visitors: visitors.length,
       page_views: pageViews.length,
       activity_logs: activityLogs.length,
+      affiliate_clicks: affiliateClicks.length,
     },
     settings: settingsMap,
     categories: categories.map((c) => ({
@@ -2364,6 +2778,7 @@ function buildStoreBackupSnapshot(exportedBy: string) {
     visitors,
     page_views: pageViews,
     activity_logs: activityLogs,
+    affiliate_clicks: affiliateClicks,
   };
 }
 
@@ -2805,8 +3220,11 @@ app.post('/api/admin/restore', requireAdmin, async (req: AuthedRequest, res: Res
             images, video_url, sizes, colors, stock_quantity, variant_stock,
             low_stock_threshold, weight, material, pieces_info, warranty_info,
             specifications, features, tags, search_keywords, status,
-            is_featured, is_bestseller, is_special_offer, sales_count, views_count
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            is_featured, is_bestseller, is_special_offer,
+            product_type, affiliate_url, affiliate_clicks, affiliate_commission_rate,
+            affiliate_reported_orders, affiliate_reported_commission,
+            sales_count, views_count
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(sku) DO UPDATE SET
             name = excluded.name,
             short_description = excluded.short_description,
@@ -2836,6 +3254,12 @@ app.post('/api/admin/restore', requireAdmin, async (req: AuthedRequest, res: Res
             is_featured = excluded.is_featured,
             is_bestseller = excluded.is_bestseller,
             is_special_offer = excluded.is_special_offer,
+            product_type = excluded.product_type,
+            affiliate_url = excluded.affiliate_url,
+            affiliate_clicks = excluded.affiliate_clicks,
+            affiliate_commission_rate = excluded.affiliate_commission_rate,
+            affiliate_reported_orders = excluded.affiliate_reported_orders,
+            affiliate_reported_commission = excluded.affiliate_reported_commission,
             updated_at = datetime('now')`
         );
         for (const p of snapshot!.products as Record<string, unknown>[]) {
@@ -2880,6 +3304,14 @@ app.post('/api/admin/restore', requireAdmin, async (req: AuthedRequest, res: Res
             p.is_featured ? 1 : 0,
             p.is_bestseller ? 1 : 0,
             p.is_special_offer ? 1 : 0,
+            p.product_type === 'aliexpress_affiliate' ? 'aliexpress_affiliate' : 'direct',
+            String(p.affiliate_url || ''),
+            Number(p.affiliate_clicks || 0),
+            p.affiliate_commission_rate !== null && p.affiliate_commission_rate !== undefined && p.affiliate_commission_rate !== ''
+              ? Number(p.affiliate_commission_rate)
+              : null,
+            Number(p.affiliate_reported_orders || 0),
+            Number(p.affiliate_reported_commission || 0),
             Number(p.sales_count || 0),
             Number(p.views_count || 0)
           );
@@ -2892,15 +3324,16 @@ app.post('/api/admin/restore', requireAdmin, async (req: AuthedRequest, res: Res
           `INSERT INTO orders (
             order_id, customer_name, customer_email, customer_phone, alt_phone, country, division, district, upazila, area,
             road_no, house_no, flat_no, postal_code, full_address, delivery_instructions, items, subtotal, discount_amount,
-            coupon_code, tax_amount, delivery_charge, total_amount, estimated_profit, payment_method, payment_number,
+            coupon_code, tax_amount, delivery_charge, actual_delivery_cost, total_amount, estimated_profit, payment_method, payment_number,
             sender_number, transaction_id, payment_screenshot, payment_status, order_status, courier_name, tracking_number,
             refund_status, admin_note
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(order_id) DO UPDATE SET
             payment_status = excluded.payment_status,
             order_status = excluded.order_status,
             courier_name = excluded.courier_name,
             tracking_number = excluded.tracking_number,
+            actual_delivery_cost = excluded.actual_delivery_cost,
             admin_note = excluded.admin_note`
         );
         for (const o of snapshot!.orders as Record<string, unknown>[]) {
@@ -2929,6 +3362,7 @@ app.post('/api/admin/restore', requireAdmin, async (req: AuthedRequest, res: Res
             String(o.coupon_code || ''),
             Number(o.tax_amount || 0),
             Number(o.delivery_charge || 0),
+            Number(o.actual_delivery_cost || 0),
             Number(o.total_amount || 0),
             Number(o.estimated_profit || 0),
             String(o.payment_method || 'Cash on Delivery'),

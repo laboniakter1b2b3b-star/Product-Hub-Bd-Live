@@ -43,6 +43,12 @@ export interface Product {
   is_featured: boolean;
   is_bestseller: boolean;
   is_special_offer: boolean;
+  product_type: 'direct' | 'aliexpress_affiliate';
+  affiliate_url: string;
+  affiliate_clicks: number;
+  affiliate_commission_rate: number | null;
+  affiliate_reported_orders: number;
+  affiliate_reported_commission: number;
   sales_count: number;
   views_count: number;
   rating: number;
@@ -155,6 +161,7 @@ export interface Order {
   coupon_code: string;
   tax_amount: number;
   delivery_charge: number;
+  actual_delivery_cost?: number;
   total_amount: number;
   estimated_profit: number;
   payment_method: 'bKash' | 'Nagad' | 'Cash on Delivery';
@@ -253,9 +260,45 @@ export interface DashboardData {
   };
   financials: {
     totalSales: number;
+    directProductSales: number;
+    discounts: number;
+    deliveryCollected: number;
+    taxCollected: number;
+    totalRevenue: number;
     totalCogs: number;
+    deliveryCosts: number;
+    operationalExpenses: number;
     totalExpenses: number;
     estimatedProfit: number;
+    netProfit: number;
+  };
+  affiliate: {
+    accountConfigured: boolean;
+    accountName: string;
+    trackingId: string;
+    totalAffiliateProducts: number;
+    totalClicks: number;
+    clicksToday: number;
+    reportedOrders: number;
+    reportedCommissions: number;
+    topProducts: {
+      id: number;
+      name: string;
+      sku: string;
+      affiliate_url: string;
+      affiliate_clicks: number;
+      affiliate_reported_orders: number;
+      affiliate_reported_commission: number;
+      effective_price: number;
+      image: string;
+    }[];
+    recentClicks: {
+      id: number;
+      product_id: number;
+      product_name: string;
+      sku: string;
+      created_at: string;
+    }[];
   };
   charts: {
     daily: { label: string; orders: number; revenue: number }[];

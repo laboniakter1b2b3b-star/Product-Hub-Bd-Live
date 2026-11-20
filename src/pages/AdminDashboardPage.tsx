@@ -46,6 +46,7 @@ import { apiFetch, downloadAuthenticatedBlob, uploadImageFile } from '../lib/api
 import { downloadJsonFile, exportToCsv, formatBDT, formatDateShort, formatDateTime } from '../lib/format.ts';
 import { AdminProductModal } from '../components/AdminProductModal.tsx';
 import { OfflineIndicator, PWAInstallButton } from '../components/PWAInstallButton.tsx';
+import { LanguageSwitcher } from '../components/LanguageSwitcher.tsx';
 
 type AdminTab =
   | 'overview'
@@ -100,6 +101,7 @@ export function AdminDashboardPage() {
   const [productBrandFilter, setProductBrandFilter] = useState('all');
   const [productStockFilter, setProductStockFilter] = useState<'all' | 'in_stock' | 'low_stock' | 'out_of_stock'>('all');
   const [productStatusFilter, setProductStatusFilter] = useState<'all' | 'Active' | 'Draft' | 'Out of Stock'>('all');
+  const [productModelFilter, setProductModelFilter] = useState<'all' | 'direct' | 'aliexpress_affiliate'>('all');
   const [productSort, setProductSort] = useState<'newest' | 'price_asc' | 'price_desc' | 'stock_asc' | 'stock_desc'>('newest');
   const [productPage, setProductPage] = useState(1);
   const [editingProduct, setEditingProduct] = useState<Product | null | undefined>(undefined);
@@ -153,15 +155,43 @@ export function AdminDashboardPage() {
       totalOrders: number;
       validOrders: number;
       cancelledOrReturned: number;
+      directProductSales: number;
+      discounts: number;
+      deliveryCollected: number;
+      taxCollected: number;
       revenue: number;
       cogs: number;
+      deliveryCosts: number;
+      operationalExpenses: number;
       expenses: number;
       netProfit: number;
+    };
+    affiliateSummary: {
+      accountConfigured: boolean;
+      accountName: string;
+      trackingId: string;
+      totalProducts: number;
+      clicksInRange: number;
+      totalAllTimeClicks: number;
+      reportedOrders: number;
+      reportedCommissions: number;
+      products: {
+        id: number;
+        name: string;
+        sku: string;
+        affiliate_url: string;
+        clicksInRange: number;
+        totalClicks: number;
+        commissionRate: number | null;
+        reportedOrders: number;
+        reportedCommission: number;
+      }[];
     };
     paymentBreakdown: Record<string, number>;
   } | null>(null);
 
   const [settingsForm, setSettingsForm] = useState<Record<string, string>>({});
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [downloadingBackup, setDownloadingBackup] = useState(false);
   const [downloadingFullWebsite, setDownloadingFullWebsite] = useState(false);
@@ -174,7 +204,7 @@ export function AdminDashboardPage() {
 
   const loadAllAdminData = useCallback(async () => {
     try {
-      const [dash, ords, prods, coups, hist, custs, msgs, exps, logs] = await Promise.all([
+      const [dash, ords, prods, coups, hist, custs, msgs, exps, logs, adminSettings] = await Promise.all([
         apiFetch<DashboardData>('/api/admin/dashboard'),
         apiFetch<Order[]>('/api/admin/orders'),
         apiFetch<{ products: Product[] }>('/api/products?includeDrafts=1&limit=100'),
@@ -184,6 +214,7 @@ export function AdminDashboardPage() {
         apiFetch<ContactMessage[]>('/api/admin/messages'),
         apiFetch<Expense[]>('/api/admin/expenses'),
         apiFetch<ActivityLog[]>('/api/admin/activity-logs'),
+        apiFetch<Record<string, string>>('/api/admin/settings'),
       ]);
       setDashboard(dash);
       setOrders(ords);
@@ -194,8 +225,13 @@ export function AdminDashboardPage() {
       setMessages(msgs);
       setExpenses(exps);
       setActivityLogs(logs);
-      if (prods.products.length > 0 && adjustProdId === 0) {
-        const first = prods.products[0];
+      if (!settingsLoaded) {
+        setSettingsForm(adminSettings);
+        setSettingsLoaded(true);
+      }
+      const directProds = prods.products.filter((p) => p.product_type !== 'aliexpress_affiliate');
+      if (directProds.length > 0 && adjustProdId === 0) {
+        const first = directProds[0];
         setAdjustProdId(first.id);
         const firstKey = Object.keys(first.variant_stock || {})[0] || '';
         setAdjustVariantKey(firstKey);
@@ -204,7 +240,7 @@ export function AdminDashboardPage() {
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Failed to load admin data', 'error');
     }
-  }, [adjustProdId, toast]);
+  }, [adjustProdId, settingsLoaded, toast]);
 
   useEffect(() => {
     if (user?.role === 'admin' && !user.must_change_password) {
@@ -213,8 +249,10 @@ export function AdminDashboardPage() {
   }, [user, loadAllAdminData]);
 
   useEffect(() => {
-    setSettingsForm(settings);
-  }, [settings]);
+    if (!settingsLoaded && Object.keys(settings).length > 0) {
+      setSettingsForm((prev) => ({ ...settings, ...prev }));
+    }
+  }, [settings, settingsLoaded]);
 
   const loadReports = useCallback(async () => {
     try {
@@ -268,7 +306,14 @@ export function AdminDashboardPage() {
 
   const handleUpdateOrder = async (
     orderId: number,
-    patch: { order_status?: string; courier_name?: string; tracking_number?: string; admin_note?: string; refund_status?: string }
+    patch: {
+      order_status?: string;
+      courier_name?: string;
+      tracking_number?: string;
+      admin_note?: string;
+      refund_status?: string;
+      actual_delivery_cost?: number;
+    }
   ) => {
     try {
       const updated = await apiFetch<Order>(`/api/admin/orders/${orderId}`, {
@@ -467,14 +512,21 @@ export function AdminDashboardPage() {
       if (productCatFilter !== 'all' && p.category !== productCatFilter) return false;
       if (productBrandFilter !== 'all' && p.brand !== productBrandFilter) return false;
       if (productStatusFilter !== 'all' && p.status !== productStatusFilter) return false;
-      if (productStockFilter === 'out_of_stock' && p.stock_quantity > 0) return false;
+      if (productModelFilter !== 'all' && (p.product_type || 'direct') !== productModelFilter) return false;
+      if (productStockFilter === 'out_of_stock' && (p.product_type === 'aliexpress_affiliate' || p.stock_quantity > 0)) return false;
       if (
         productStockFilter === 'low_stock' &&
-        (p.stock_quantity <= 0 || p.stock_quantity > (p.low_stock_threshold || 5))
+        (p.product_type === 'aliexpress_affiliate' || p.stock_quantity <= 0 || p.stock_quantity > (p.low_stock_threshold || 5))
       ) {
         return false;
       }
-      if (productStockFilter === 'in_stock' && p.stock_quantity <= (p.low_stock_threshold || 5)) return false;
+      if (
+        productStockFilter === 'in_stock' &&
+        p.product_type !== 'aliexpress_affiliate' &&
+        p.stock_quantity <= (p.low_stock_threshold || 5)
+      ) {
+        return false;
+      }
 
       if (productSearch.trim()) {
         const q = productSearch.trim().toLowerCase();
@@ -623,6 +675,7 @@ export function AdminDashboardPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="hidden xl:inline text-xs text-zinc-500 mr-1">Signed in as {user.username || user.name}</span>
+            <LanguageSwitcher />
             <PWAInstallButton />
             <button
               type="button"
@@ -737,20 +790,98 @@ export function AdminDashboardPage() {
                   </p>
                 </div>
                 <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800">
-                  <p className="text-xs text-zinc-500">Total Sales</p>
+                  <p className="text-xs text-zinc-500">Direct Store Revenue</p>
                   <p className="font-mono text-2xl font-bold tabular-nums mt-1">
                     {formatBDT(dashboard.financials.totalSales)}
                   </p>
                   <p className="text-[11px] text-zinc-500 mt-1">
-                    Estimated Profit: {formatBDT(dashboard.financials.estimatedProfit)}
+                    Net Profit: {formatBDT(dashboard.financials.netProfit ?? dashboard.financials.estimatedProfit)}
                   </p>
                 </div>
                 <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800">
-                  <p className="text-xs text-zinc-500">Total Orders</p>
-                  <p className="font-mono text-2xl font-bold tabular-nums mt-1">{dashboard.orders.totalOrders}</p>
+                  <p className="text-xs text-zinc-500">Direct Orders / AliExpress Clicks</p>
+                  <p className="font-mono text-2xl font-bold tabular-nums mt-1">
+                    {dashboard.orders.totalOrders}{' '}
+                    <span className="text-sm font-normal text-orange-500">/ {dashboard.affiliate?.totalClicks || 0} clicks</span>
+                  </p>
                   <p className="text-[11px] text-amber-500 mt-1">
                     Pending Payment Verify: {dashboard.orders.pendingPaymentsCount}
                   </p>
+                </div>
+              </div>
+
+              {/* Dual Business Model Overview (Strictly Separated) */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-display text-base font-bold">Direct Product Store Financials</h2>
+                    <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-[#0F6E56]/15 text-[#0F6E56] dark:text-[#14B8A6]">
+                      Direct Sales Only
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Direct Product Sales</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{formatBDT(dashboard.financials.directProductSales)}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Discounts Given</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{formatBDT(dashboard.financials.discounts)}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Product Costs (COGS)</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{formatBDT(dashboard.financials.totalCogs)}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Delivery Costs</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{formatBDT(dashboard.financials.deliveryCosts)}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Total Revenue</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{formatBDT(dashboard.financials.totalRevenue)}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Net Profit</p>
+                      <p className="font-mono font-bold text-sm text-[#0F6E56] dark:text-[#14B8A6] mt-0.5">
+                        {formatBDT(dashboard.financials.netProfit)}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-5 rounded-2xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-display text-base font-bold">AliExpress Affiliate Analytics</h2>
+                    <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-orange-500/15 text-orange-500">
+                      {dashboard.affiliate?.accountConfigured
+                        ? `Single Account: ${dashboard.affiliate.trackingId}`
+                        : 'Account Tracking ID Not Set'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Affiliate Products</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{dashboard.affiliate?.totalAffiliateProducts || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Total Link Clicks</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{dashboard.affiliate?.totalClicks || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Clicks Today</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{dashboard.affiliate?.clicksToday || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60">
+                      <p className="text-zinc-500">Confirmed Orders</p>
+                      <p className="font-mono font-bold text-sm mt-0.5">{dashboard.affiliate?.reportedOrders || 0}</p>
+                    </div>
+                    <div className="p-3 rounded-lg bg-zinc-50 dark:bg-zinc-900/60 col-span-2">
+                      <p className="text-zinc-500">Confirmed Commissions</p>
+                      <p className="font-mono font-bold text-sm text-orange-500 mt-0.5">
+                        {formatBDT(dashboard.affiliate?.reportedCommissions || 0)}
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -1096,7 +1227,25 @@ export function AdminDashboardPage() {
                           <td className="p-3.5 text-right font-mono font-bold tabular-nums">
                             {formatBDT(o.total_amount)}
                           </td>
-                          <td className="p-3.5 text-right space-x-2">
+                          <td className="p-3.5 text-right space-x-1.5 whitespace-nowrap">
+                            {o.order_status === 'Pending' && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateOrder(o.id, { order_status: 'Confirmed' })}
+                                  className="px-2 py-1 rounded bg-[#0F6E56] dark:bg-[#14B8A6] text-white dark:text-zinc-950 font-semibold"
+                                >
+                                  Accept
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateOrder(o.id, { order_status: 'Cancelled' })}
+                                  className="px-2 py-1 rounded border border-red-500/40 text-red-500 hover:bg-red-500/10 font-semibold"
+                                >
+                                  Reject
+                                </button>
+                              </>
+                            )}
                             <button
                               type="button"
                               onClick={() => setSelectedOrder(o)}
@@ -1174,7 +1323,7 @@ export function AdminDashboardPage() {
               </div>
 
               {/* Search, Filter & Sort Toolbar */}
-              <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3 text-xs">
+              <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-3 text-xs">
                 <div className="relative sm:col-span-2">
                   <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
@@ -1188,6 +1337,20 @@ export function AdminDashboardPage() {
                     className="w-full pl-9 pr-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
                   />
                 </div>
+
+                <select
+                  value={productModelFilter}
+                  onChange={(e) => {
+                    setProductModelFilter(e.target.value as 'all' | 'direct' | 'aliexpress_affiliate');
+                    setProductPage(1);
+                  }}
+                  aria-label="Filter by business model"
+                  className="px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
+                >
+                  <option value="all">All Selling Models</option>
+                  <option value="direct">Direct Store</option>
+                  <option value="aliexpress_affiliate">AliExpress Affiliate</option>
+                </select>
 
                 <select
                   value={productCatFilter}
@@ -1276,6 +1439,7 @@ export function AdminDashboardPage() {
                     productBrandFilter !== 'all' ||
                     productStockFilter !== 'all' ||
                     productStatusFilter !== 'all' ||
+                    productModelFilter !== 'all' ||
                     productSort !== 'newest') && (
                     <button
                       type="button"
@@ -1285,6 +1449,7 @@ export function AdminDashboardPage() {
                         setProductBrandFilter('all');
                         setProductStockFilter('all');
                         setProductStatusFilter('all');
+                        setProductModelFilter('all');
                         setProductSort('newest');
                         setProductPage(1);
                       }}
@@ -1302,12 +1467,12 @@ export function AdminDashboardPage() {
                   <thead className="border-b border-zinc-200 dark:border-zinc-800 text-zinc-500 bg-zinc-50/70 dark:bg-zinc-900/40">
                     <tr>
                       <th className="p-3.5">Product Image</th>
-                      <th className="p-3.5">Product Name</th>
+                      <th className="p-3.5">Product Name &amp; Model</th>
                       <th className="p-3.5">Product ID</th>
                       <th className="p-3.5">Category</th>
                       <th className="p-3.5 text-right">Regular Price</th>
                       <th className="p-3.5 text-right">Discount Price</th>
-                      <th className="p-3.5 text-right">Stock</th>
+                      <th className="p-3.5 text-right">Stock / Clicks</th>
                       <th className="p-3.5">Status</th>
                       <th className="p-3.5">Date Added</th>
                       <th className="p-3.5 text-right">Actions</th>
@@ -1322,6 +1487,7 @@ export function AdminDashboardPage() {
                       </tr>
                     ) : (
                       paginatedAdminProducts.map((p) => {
+                        const isAffiliate = p.product_type === 'aliexpress_affiliate';
                         const hasDiscount = p.sale_price !== null && p.sale_price < p.regular_price;
                         const lowLimit = p.low_stock_threshold || 5;
                         const stockClass =
@@ -1346,9 +1512,18 @@ export function AdminDashboardPage() {
                               )}
                             </td>
                             <td className="p-3.5 max-w-[220px]">
-                              <p className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">{p.name}</p>
-                              <p className="text-[11px] text-zinc-500 truncate">
-                                {p.brand}
+                              <div className="flex items-center gap-1.5">
+                                <p className="font-semibold text-zinc-900 dark:text-zinc-100 truncate">{p.name}</p>
+                              </div>
+                              <p className="text-[11px] text-zinc-500 truncate mt-0.5">
+                                <span
+                                  className={`font-semibold mr-1.5 ${
+                                    isAffiliate ? 'text-orange-500' : 'text-[#0F6E56] dark:text-[#14B8A6]'
+                                  }`}
+                                >
+                                  {isAffiliate ? 'AliExpress' : 'Direct'}
+                                </span>
+                                · {p.brand}
                                 {p.pieces_info ? ` · ${p.pieces_info}` : ''}
                               </p>
                             </td>
@@ -1376,8 +1551,12 @@ export function AdminDashboardPage() {
                                 <span className="text-zinc-400">—</span>
                               )}
                             </td>
-                            <td className={`p-3.5 text-right font-mono font-bold tabular-nums whitespace-nowrap ${stockClass}`}>
-                              {p.stock_quantity}
+                            <td
+                              className={`p-3.5 text-right font-mono font-bold tabular-nums whitespace-nowrap ${
+                                isAffiliate ? 'text-orange-500' : stockClass
+                              }`}
+                            >
+                              {isAffiliate ? `${p.affiliate_clicks || 0} clicks` : p.stock_quantity}
                             </td>
                             <td className="p-3.5 whitespace-nowrap">
                               <button
@@ -1697,11 +1876,13 @@ export function AdminDashboardPage() {
                       }}
                       className="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
                     >
-                      {adminProducts.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name} ({p.sku})
-                        </option>
-                      ))}
+                      {adminProducts
+                        .filter((p) => p.product_type !== 'aliexpress_affiliate')
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} ({p.sku})
+                          </option>
+                        ))}
                     </select>
                   </div>
                   <div>
@@ -1933,30 +2114,209 @@ export function AdminDashboardPage() {
               </div>
 
               {reportData && (
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800">
-                    <p className="text-xs text-zinc-500">Gross Revenue</p>
-                    <p className="font-mono text-2xl font-bold tabular-nums mt-1">
-                      {formatBDT(reportData.summary.revenue)}
-                    </p>
+                <div className="space-y-6">
+                  {/* Direct Store Report (Strictly Separate) */}
+                  <div className="p-6 rounded-2xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h2 className="font-display text-lg font-bold">Direct Store Sales &amp; Net Profit Report</h2>
+                        <p className="text-xs text-zinc-500">
+                          Excludes AliExpress affiliate links. Valid Orders: {reportData.summary.validOrders} · Cancelled/Returned:{' '}
+                          {reportData.summary.cancelledOrReturned}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          exportToCsv(
+                            `direct-sales-report-${new Date().toISOString().slice(0, 10)}.csv`,
+                            [
+                              'Direct Product Sales',
+                              'Discounts',
+                              'Delivery Collected',
+                              'Tax Collected',
+                              'Total Revenue',
+                              'Product Costs (COGS)',
+                              'Delivery Costs',
+                              'Operational Expenses',
+                              'Net Profit',
+                            ],
+                            [
+                              [
+                                reportData.summary.directProductSales,
+                                reportData.summary.discounts,
+                                reportData.summary.deliveryCollected,
+                                reportData.summary.taxCollected,
+                                reportData.summary.revenue,
+                                reportData.summary.cogs,
+                                reportData.summary.deliveryCosts,
+                                reportData.summary.operationalExpenses,
+                                reportData.summary.netProfit,
+                              ],
+                            ]
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-semibold inline-flex items-center gap-1.5"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Export Direct Report (.CSV)
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Direct Product Sales</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {formatBDT(reportData.summary.directProductSales)}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Discounts Given</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {formatBDT(reportData.summary.discounts)}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Product Costs (COGS)</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {formatBDT(reportData.summary.cogs)}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Delivery Costs</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {formatBDT(reportData.summary.deliveryCosts)}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Operational Expenses</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {formatBDT(reportData.summary.operationalExpenses)}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Total Revenue</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {formatBDT(reportData.summary.revenue)}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 sm:col-span-2">
+                        <p className="text-xs text-zinc-500">Net Profit (Total Revenue - COGS - Delivery - Ops)</p>
+                        <p className="font-mono text-2xl font-bold tabular-nums text-[#0F6E56] dark:text-[#14B8A6] mt-1">
+                          {formatBDT(reportData.summary.netProfit)}
+                        </p>
+                      </div>
+                    </div>
                   </div>
-                  <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800">
-                    <p className="text-xs text-zinc-500">Cost of Goods (COGS)</p>
-                    <p className="font-mono text-2xl font-bold tabular-nums mt-1">
-                      {formatBDT(reportData.summary.cogs)}
-                    </p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800">
-                    <p className="text-xs text-zinc-500">Operational Expenses</p>
-                    <p className="font-mono text-2xl font-bold tabular-nums mt-1">
-                      {formatBDT(reportData.summary.expenses)}
-                    </p>
-                  </div>
-                  <div className="p-4 rounded-xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800">
-                    <p className="text-xs text-zinc-500">Net Estimated Profit</p>
-                    <p className="font-mono text-2xl font-bold tabular-nums text-[#14B8A6] mt-1">
-                      {formatBDT(reportData.summary.netProfit)}
-                    </p>
+
+                  {/* AliExpress Affiliate Report (Strictly Separate) */}
+                  <div className="p-6 rounded-2xl bg-white dark:bg-[#14171D] border border-zinc-200 dark:border-zinc-800 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h2 className="font-display text-lg font-bold">AliExpress Affiliate Performance Report (Separate)</h2>
+                        <p className="text-xs text-zinc-500">
+                          Single Publisher Account: <strong>{reportData.affiliateSummary.accountName}</strong> · Tracking ID:{' '}
+                          <span className="font-mono">{reportData.affiliateSummary.trackingId || 'Not configured'}</span>
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          exportToCsv(
+                            `aliexpress-affiliate-report-${new Date().toISOString().slice(0, 10)}.csv`,
+                            ['Product', 'SKU', 'Clicks (Range)', 'All-Time Clicks', 'Commission Rate %', 'Confirmed Orders', 'Confirmed Commission (BDT)', 'Affiliate URL'],
+                            reportData.affiliateSummary.products.map((ap) => [
+                              ap.name,
+                              ap.sku,
+                              ap.clicksInRange,
+                              ap.totalClicks,
+                              ap.commissionRate ?? '',
+                              ap.reportedOrders,
+                              ap.reportedCommission,
+                              ap.affiliate_url,
+                            ])
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg border border-zinc-300 dark:border-zinc-700 text-xs font-semibold inline-flex items-center gap-1.5"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Export Affiliate Report (.CSV)
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Clicks (Selected Range)</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {reportData.affiliateSummary.clicksInRange}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">All-Time Affiliate Clicks</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {reportData.affiliateSummary.totalAllTimeClicks}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Confirmed Portal Orders</p>
+                        <p className="font-mono text-xl font-bold tabular-nums mt-1">
+                          {reportData.affiliateSummary.reportedOrders}
+                        </p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800">
+                        <p className="text-xs text-zinc-500">Confirmed Commissions</p>
+                        <p className="font-mono text-xl font-bold tabular-nums text-orange-500 mt-1">
+                          {formatBDT(reportData.affiliateSummary.reportedCommissions)}
+                        </p>
+                      </div>
+                    </div>
+
+                    {reportData.affiliateSummary.products.length > 0 ? (
+                      <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-800">
+                        <table className="w-full text-xs text-left">
+                          <thead className="border-b border-zinc-200 dark:border-zinc-800 text-zinc-500 bg-zinc-50/70 dark:bg-zinc-900/40">
+                            <tr>
+                              <th className="p-3">Affiliate Product</th>
+                              <th className="p-3">SKU</th>
+                              <th className="p-3 text-right">Clicks (Range)</th>
+                              <th className="p-3 text-right">Total Clicks</th>
+                              <th className="p-3 text-right">Rate</th>
+                              <th className="p-3 text-right">Confirmed Orders</th>
+                              <th className="p-3 text-right">Confirmed Commission</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800">
+                            {reportData.affiliateSummary.products.map((ap) => (
+                              <tr key={ap.id}>
+                                <td className="p-3 font-medium">
+                                  <a
+                                    href={ap.affiliate_url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="hover:text-orange-500 inline-flex items-center gap-1"
+                                  >
+                                    <span>{ap.name}</span>
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                </td>
+                                <td className="p-3 font-mono text-zinc-500">{ap.sku}</td>
+                                <td className="p-3 text-right font-mono tabular-nums">{ap.clicksInRange}</td>
+                                <td className="p-3 text-right font-mono tabular-nums font-semibold">{ap.totalClicks}</td>
+                                <td className="p-3 text-right font-mono tabular-nums">
+                                  {ap.commissionRate !== null ? `${ap.commissionRate}%` : 'Default'}
+                                </td>
+                                <td className="p-3 text-right font-mono tabular-nums">{ap.reportedOrders}</td>
+                                <td className="p-3 text-right font-mono tabular-nums text-orange-500 font-semibold">
+                                  {formatBDT(ap.reportedCommission)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-zinc-500">
+                        No AliExpress affiliate products added yet. Add a product and choose &ldquo;AliExpress Affiliate Product&rdquo; to begin tracking clicks separately.
+                      </p>
+                    )}
                   </div>
                 </div>
               )}
@@ -2319,6 +2679,84 @@ export function AdminDashboardPage() {
                   </div>
                 </div>
 
+                {/* 1B. AliExpress Affiliate Account Settings (Single Account Only) */}
+                <div className="p-4 rounded-xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200 dark:border-zinc-800 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h2 className="font-display font-bold text-base text-orange-500">
+                        AliExpress Affiliate Account (Single Account Only)
+                      </h2>
+                      <p className="text-[11px] text-zinc-500">
+                        Configure your ONE AliExpress Portals affiliate account for click redirects &amp; commission disclosure.
+                      </p>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs font-semibold cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={settingsForm.aliexpress_enabled === 'true'}
+                        onChange={(e) =>
+                          setSettingsForm((p) => ({ ...p, aliexpress_enabled: e.target.checked ? 'true' : 'false' }))
+                        }
+                      />
+                      <span>Enable AliExpress Affiliate</span>
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+                    <div>
+                      <label className="block text-zinc-500 mb-1">Publisher / Account Name</label>
+                      <input
+                        type="text"
+                        value={settingsForm.aliexpress_account_name ?? ''}
+                        onChange={(e) => setSettingsForm((p) => ({ ...p, aliexpress_account_name: e.target.value }))}
+                        placeholder="PRODUCT HUB BD AliExpress Affiliate"
+                        className="w-full px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-500 mb-1">AliExpress Portals Tracking ID</label>
+                      <input
+                        type="text"
+                        value={settingsForm.aliexpress_tracking_id ?? ''}
+                        onChange={(e) => setSettingsForm((p) => ({ ...p, aliexpress_tracking_id: e.target.value }))}
+                        placeholder="e.g. producthubbd"
+                        className="w-full px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-500 mb-1">Portals App Key (Private · Never Public)</label>
+                      <input
+                        type="password"
+                        value={settingsForm.aliexpress_app_key ?? ''}
+                        onChange={(e) => setSettingsForm((p) => ({ ...p, aliexpress_app_key: e.target.value }))}
+                        placeholder="Optional AliExpress Portals API App Key"
+                        className="w-full px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-500 mb-1">Default Commission Rate % (Optional)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step="0.1"
+                        value={settingsForm.aliexpress_commission_rate ?? ''}
+                        onChange={(e) => setSettingsForm((p) => ({ ...p, aliexpress_commission_rate: e.target.value }))}
+                        placeholder="e.g. 6.5"
+                        className="w-full px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="block text-zinc-500 mb-1">Storefront Affiliate Disclosure Text</label>
+                      <textarea
+                        rows={2}
+                        value={settingsForm.aliexpress_disclosure ?? ''}
+                        onChange={(e) => setSettingsForm((p) => ({ ...p, aliexpress_disclosure: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 {/* 2. Brand Identity, Logo, Favicon & Promo Strip */}
                 <div className="space-y-3">
                   <h2 className="font-display font-bold text-base">Brand Identity &amp; Header</h2>
@@ -2359,10 +2797,15 @@ export function AdminDashboardPage() {
                             className="hidden"
                             onChange={async (e) => {
                               const f = e.target.files?.[0];
+                              e.target.value = '';
                               if (!f) return;
-                              const url = await uploadImageFile(f, 'logo');
-                              setSettingsForm((p) => ({ ...p, site_logo: url }));
-                              toast('Logo uploaded. Click Save All Settings to apply.');
+                              try {
+                                const url = await uploadImageFile(f, 'logo');
+                                setSettingsForm((p) => ({ ...p, site_logo: url }));
+                                toast('Logo uploaded. Click Save All Settings to apply.');
+                              } catch (err) {
+                                toast(err instanceof Error ? err.message : 'Logo upload failed', 'error');
+                              }
                             }}
                           />
                         </label>
@@ -2386,16 +2829,21 @@ export function AdminDashboardPage() {
                             className="hidden"
                             onChange={async (e) => {
                               const f = e.target.files?.[0];
+                              e.target.value = '';
                               if (!f) return;
-                              const url = await uploadImageFile(f, 'favicon');
-                              setSettingsForm((p) => ({ ...p, favicon_url: url }));
-                              toast('Favicon uploaded. Click Save All Settings to apply.');
+                              try {
+                                const url = await uploadImageFile(f, 'favicon');
+                                setSettingsForm((p) => ({ ...p, favicon_url: url }));
+                                toast('Favicon uploaded. Click Save All Settings to apply.');
+                              } catch (err) {
+                                toast(err instanceof Error ? err.message : 'Favicon upload failed', 'error');
+                              }
                             }}
                           />
                         </label>
                       </div>
                     </div>
-                    <div className="sm:col-span-2">
+                    <div>
                       <label className="block text-zinc-500 mb-1">Top Announcement Strip (Leave empty to hide)</label>
                       <input
                         type="text"
@@ -2403,6 +2851,18 @@ export function AdminDashboardPage() {
                         onChange={(e) => setSettingsForm((p) => ({ ...p, promo_banner_text: e.target.value }))}
                         className="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
                       />
+                    </div>
+                    <div>
+                      <label className="block text-zinc-500 mb-1">Default Storefront Language (Auto Translate)</label>
+                      <select
+                        value={settingsForm.default_language ?? 'auto'}
+                        onChange={(e) => setSettingsForm((p) => ({ ...p, default_language: e.target.value }))}
+                        className="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700"
+                      >
+                        <option value="auto">Auto Detect (Browser Language: Bangla / English)</option>
+                        <option value="bn">বাংলা (Auto Bangla)</option>
+                        <option value="en">English (Auto English)</option>
+                      </select>
                     </div>
                   </div>
                 </div>
@@ -2428,10 +2888,15 @@ export function AdminDashboardPage() {
                             className="hidden"
                             onChange={async (e) => {
                               const f = e.target.files?.[0];
+                              e.target.value = '';
                               if (!f) return;
-                              const url = await uploadImageFile(f, 'hero');
-                              setSettingsForm((p) => ({ ...p, hero_banner: url }));
-                              toast('Hero banner uploaded. Click Save All Settings to apply.');
+                              try {
+                                const url = await uploadImageFile(f, 'hero');
+                                setSettingsForm((p) => ({ ...p, hero_banner: url }));
+                                toast('Hero banner uploaded. Click Save All Settings to apply.');
+                              } catch (err) {
+                                toast(err instanceof Error ? err.message : 'Hero banner upload failed', 'error');
+                              }
                             }}
                           />
                         </label>
@@ -2481,10 +2946,15 @@ export function AdminDashboardPage() {
                             className="hidden"
                             onChange={async (e) => {
                               const f = e.target.files?.[0];
+                              e.target.value = '';
                               if (!f) return;
-                              const url = await uploadImageFile(f, 'secondary-banner');
-                              setSettingsForm((p) => ({ ...p, secondary_banner: url }));
-                              toast('Secondary banner uploaded. Click Save All Settings to apply.');
+                              try {
+                                const url = await uploadImageFile(f, 'secondary-banner');
+                                setSettingsForm((p) => ({ ...p, secondary_banner: url }));
+                                toast('Secondary banner uploaded. Click Save All Settings to apply.');
+                              } catch (err) {
+                                toast(err instanceof Error ? err.message : 'Secondary banner upload failed', 'error');
+                              }
                             }}
                           />
                         </label>
@@ -2789,16 +3259,23 @@ export function AdminDashboardPage() {
               <div>
                 <p className="text-zinc-500 font-semibold">Customer &amp; Delivery</p>
                 <p className="font-semibold text-sm mt-1">{selectedOrder.customer_name}</p>
-                <p className="font-mono">{selectedOrder.customer_phone}</p>
-                <p>{selectedOrder.customer_email}</p>
+                <p className="font-mono">{selectedOrder.customer_phone}{selectedOrder.alt_phone ? ` / ${selectedOrder.alt_phone}` : ''}</p>
+                {selectedOrder.customer_email && <p>{selectedOrder.customer_email}</p>}
                 <p className="text-zinc-500 mt-1">
-                  {selectedOrder.full_address}, {selectedOrder.area}, {selectedOrder.district}, {selectedOrder.country}
+                  {selectedOrder.full_address}, {selectedOrder.area}
+                  {selectedOrder.upazila ? `, ${selectedOrder.upazila}` : ''}, {selectedOrder.district}
+                  {selectedOrder.division ? `, ${selectedOrder.division}` : ''}, {selectedOrder.country}
+                  {selectedOrder.postal_code ? ` (${selectedOrder.postal_code})` : ''}
                 </p>
+                {selectedOrder.delivery_instructions && (
+                  <p className="text-[11px] text-zinc-500 mt-1">Note: {selectedOrder.delivery_instructions}</p>
+                )}
               </div>
               <div className="space-y-1">
-                <p className="text-zinc-500 font-semibold">Payment</p>
+                <p className="text-zinc-500 font-semibold">Payment &amp; Status</p>
                 <p>Method: {selectedOrder.payment_method}</p>
-                <p>Status: <strong>{selectedOrder.payment_status}</strong></p>
+                <p>Payment: <strong>{selectedOrder.payment_status}</strong></p>
+                <p>Order Status: <strong>{selectedOrder.order_status}</strong></p>
                 {selectedOrder.transaction_id && <p className="font-mono">TrxID: {selectedOrder.transaction_id}</p>}
                 {selectedOrder.payment_screenshot && (
                   <button
@@ -2809,6 +3286,24 @@ export function AdminDashboardPage() {
                     View Payment Screenshot
                   </button>
                 )}
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <button
+                    type="button"
+                    disabled={selectedOrder.order_status === 'Confirmed'}
+                    onClick={() => handleUpdateOrder(selectedOrder.id, { order_status: 'Confirmed' })}
+                    className="px-3 py-1.5 rounded-lg bg-[#0F6E56] dark:bg-[#14B8A6] text-white dark:text-zinc-950 font-semibold disabled:opacity-40"
+                  >
+                    Accept Order
+                  </button>
+                  <button
+                    type="button"
+                    disabled={selectedOrder.order_status === 'Cancelled'}
+                    onClick={() => handleUpdateOrder(selectedOrder.id, { order_status: 'Cancelled' })}
+                    className="px-3 py-1.5 rounded-lg border border-red-500/40 text-red-500 hover:bg-red-500/10 font-semibold disabled:opacity-40"
+                  >
+                    Reject Order (Restore Stock)
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2823,7 +3318,7 @@ export function AdminDashboardPage() {
               ))}
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label className="block text-zinc-500 mb-1">Courier Name</label>
                 <input
@@ -2841,6 +3336,16 @@ export function AdminDashboardPage() {
                   defaultValue={selectedOrder.tracking_number}
                   onBlur={(e) => handleUpdateOrder(selectedOrder.id, { tracking_number: e.target.value })}
                   placeholder="Courier consignment ID"
+                  className="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-zinc-500 mb-1">Actual Delivery Cost (৳)</label>
+                <input
+                  type="number"
+                  min={0}
+                  defaultValue={selectedOrder.actual_delivery_cost ?? 0}
+                  onBlur={(e) => handleUpdateOrder(selectedOrder.id, { actual_delivery_cost: Number(e.target.value) || 0 })}
                   className="w-full px-3 py-2 rounded-lg bg-zinc-50 dark:bg-zinc-900 border border-zinc-300 dark:border-zinc-700 font-mono"
                 />
               </div>

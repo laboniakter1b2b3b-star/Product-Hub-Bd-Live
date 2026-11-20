@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Mail, Phone, MapPin, ShieldCheck, ArrowRight } from 'lucide-react';
 import { useStore } from '../context/StoreContext.tsx';
 import { apiFetch } from '../lib/api.ts';
+import { LanguageSwitcher } from './LanguageSwitcher.tsx';
 
 export function Footer() {
   const { settings, navigate, toast } = useStore();
@@ -32,7 +33,7 @@ export function Footer() {
         {/* Newsletter & Brand Strip */}
         <div className="pb-12 border-b border-zinc-200 dark:border-zinc-800 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center">
           <div className="lg:col-span-6 space-y-2">
-            <h3 className="font-display text-xl font-bold text-zinc-950 dark:text-white">
+            <h3 data-no-translate="true" className="font-display text-xl font-bold text-zinc-950 dark:text-white">
               {settings.site_name || 'PRODUCT HUB BD'}
             </h3>
             {settings.site_tagline && (
@@ -164,6 +165,7 @@ export function Footer() {
               <li className="flex items-center gap-2.5">
                 <Phone className="w-4 h-4 text-[#0F6E56] dark:text-[#14B8A6] shrink-0" />
                 <a
+                  data-no-translate="true"
                   href={`tel:${(settings.support_phone || '+8801711000000').replace(/\s+/g, '')}`}
                   className="font-mono hover:text-[#14B8A6]"
                 >
@@ -173,6 +175,7 @@ export function Footer() {
               <li className="flex items-center gap-2.5">
                 <Mail className="w-4 h-4 text-[#0F6E56] dark:text-[#14B8A6] shrink-0" />
                 <a
+                  data-no-translate="true"
                   href={`mailto:${settings.support_email || 'robiulvv290@gmail.com'}`}
                   className="hover:text-[#14B8A6]"
                 >
@@ -237,12 +240,25 @@ export function Footer() {
           </div>
         </div>
 
+        {settings.aliexpress_disclosure && (
+          <div className="py-4 border-t border-zinc-200 dark:border-zinc-800 text-[11px] text-zinc-500 dark:text-zinc-400 leading-relaxed">
+            {settings.aliexpress_disclosure}
+          </div>
+        )}
+
         {/* Bottom Copyright & Accepted Payments */}
         <div className="pt-8 border-t border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-zinc-500">
-          <p>© {new Date().getFullYear()} {settings.site_name || 'PRODUCT HUB BD'}. All rights reserved.</p>
-          <p className="font-mono">
-            bKash · Nagad{settings.cod_enabled === 'true' ? ' · Cash on Delivery' : ''}
+          <p>
+            © {new Date().getFullYear()}{' '}
+            <span data-no-translate="true">{settings.site_name || 'PRODUCT HUB BD'}</span>. All rights reserved.
           </p>
+          <div className="flex flex-wrap items-center gap-4">
+            <LanguageSwitcher variant="segmented" />
+            <p className="font-mono">
+              <span data-no-translate="true">bKash · Nagad</span>
+              {settings.cod_enabled === 'true' ? ' · Cash on Delivery' : ''}
+            </p>
+          </div>
         </div>
       </div>
     </footer>

@@ -14,6 +14,7 @@ import {
 import { useStore } from '../context/StoreContext.tsx';
 import { formatBDT } from '../lib/format.ts';
 import { PWAInstallButton } from './PWAInstallButton.tsx';
+import { LanguageSwitcher } from './LanguageSwitcher.tsx';
 
 export function Navbar({ onSearchSelect }: { onSearchSelect?: (q: string) => void }) {
   const {
@@ -123,7 +124,10 @@ export function Navbar({ onSearchSelect }: { onSearchSelect?: (q: string) => voi
                   <path d="M9 11h14M9 16h10M9 21h6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
                 </svg>
               )}
-              <span className="font-display text-lg font-bold tracking-tight text-zinc-900 dark:text-white whitespace-nowrap shrink-0">
+              <span
+                data-no-translate="true"
+                className="font-display text-lg font-bold tracking-tight text-zinc-900 dark:text-white whitespace-nowrap shrink-0"
+              >
                 {siteName}
               </span>
             </button>
@@ -163,6 +167,8 @@ export function Navbar({ onSearchSelect }: { onSearchSelect?: (q: string) => voi
             </button>
 
             <PWAInstallButton compact />
+
+            <LanguageSwitcher />
 
             <button
               type="button"
@@ -338,6 +344,12 @@ export function Navbar({ onSearchSelect }: { onSearchSelect?: (q: string) => voi
               >
                 <UserIcon className="w-4 h-4" /> {user ? 'Account' : 'Sign In'}
               </button>
+            </div>
+            <div className="pt-3 border-t border-zinc-200 dark:border-zinc-800 space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-xs font-medium text-zinc-500 dark:text-zinc-400">Language / ভাষা</span>
+              </div>
+              <LanguageSwitcher variant="segmented" />
             </div>
           </div>
         )}

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Heart, ShoppingBag, Star, GitCompare, Package } from 'lucide-react';
+import { Heart, ShoppingBag, Star, GitCompare, Package, ExternalLink } from 'lucide-react';
 import type { Product } from '../types.ts';
 import { useStore } from '../context/StoreContext.tsx';
 import { formatBDT } from '../lib/format.ts';
@@ -8,13 +8,25 @@ export function ProductCard({ product }: { product: Product }) {
   const { navigate, addToCart, wishlist, toggleWishlist, compareIds, toggleCompare, getVariantStock } = useStore();
   const [imgError, setImgError] = useState(false);
 
+  const isAffiliate = product.product_type === 'aliexpress_affiliate';
   const isWishlisted = wishlist.includes(product.id);
   const isCompared = compareIds.includes(product.id);
-  const outOfStock = product.stock_quantity <= 0 || product.status === 'Out of Stock';
+  const outOfStock = !isAffiliate && (product.stock_quantity <= 0 || product.status === 'Out of Stock');
+
+  const handleTrackAffiliateClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const sid = localStorage.getItem('phb_visitor_sid') || '';
+    fetch(`/api/products/${product.id}/affiliate-click`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: sid, referrerPage: window.location.pathname }),
+      keepalive: true,
+    }).catch(() => {});
+  };
 
   const handleQuickAdd = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (outOfStock) return;
+    if (isAffiliate || outOfStock) return;
     // Find first in-stock size + color combination
     let chosenSize = product.sizes[0] || '';
     let chosenColor = product.colors[0]?.name || '';
@@ -90,8 +102,12 @@ export function ProductCard({ product }: { product: Product }) {
           </button>
         </div>
 
-        {/* Discount / Out of Stock minimal corner text */}
-        {outOfStock ? (
+        {/* Discount / Out of Stock / AliExpress minimal corner text */}
+        {isAffiliate ? (
+          <div className="absolute bottom-2.5 left-2.5 px-2.5 py-0.5 rounded bg-orange-600/95 text-white text-[11px] font-semibold">
+            AliExpress{product.discount_percent > 0 ? ` · -${product.discount_percent}%` : ''}
+          </div>
+        ) : outOfStock ? (
           <div className="absolute bottom-2.5 left-2.5 px-2.5 py-1 rounded bg-zinc-950/85 text-zinc-200 text-[11px] font-medium">
             Out of Stock
           </div>
@@ -135,27 +151,42 @@ export function ProductCard({ product }: { product: Product }) {
               )}
             </div>
             <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mt-0.5">
-              {outOfStock
-                ? 'Unavailable'
-                : product.stock_quantity <= product.low_stock_threshold
-                  ? `Low stock (${product.stock_quantity} left)`
-                  : 'In stock'}
+              {isAffiliate
+                ? 'Official AliExpress link'
+                : outOfStock
+                  ? 'Unavailable'
+                  : product.stock_quantity <= product.low_stock_threshold
+                    ? `Low stock (${product.stock_quantity} left)`
+                    : 'In stock'}
             </p>
           </div>
 
-          <button
-            type="button"
-            disabled={outOfStock}
-            onClick={handleQuickAdd}
-            className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
-              outOfStock
-                ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed'
-                : 'bg-zinc-900 hover:bg-[#0F6E56] dark:bg-zinc-800 dark:hover:bg-[#14B8A6] text-white dark:text-zinc-100 dark:hover:text-zinc-950'
-            }`}
-          >
-            <ShoppingBag className="w-3.5 h-3.5" />
-            <span>Add</span>
-          </button>
+          {isAffiliate ? (
+            <a
+              href={product.affiliate_url || `/api/affiliate/go/${product.id}`}
+              target="_blank"
+              rel="noopener noreferrer sponsored"
+              onClick={handleTrackAffiliateClick}
+              className="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 bg-orange-600 hover:bg-orange-700 text-white"
+            >
+              <span>Buy Now</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          ) : (
+            <button
+              type="button"
+              disabled={outOfStock}
+              onClick={handleQuickAdd}
+              className={`px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                outOfStock
+                  ? 'bg-zinc-200 dark:bg-zinc-800 text-zinc-400 cursor-not-allowed'
+                  : 'bg-zinc-900 hover:bg-[#0F6E56] dark:bg-zinc-800 dark:hover:bg-[#14B8A6] text-white dark:text-zinc-100 dark:hover:text-zinc-950'
+              }`}
+            >
+              <ShoppingBag className="w-3.5 h-3.5" />
+              <span>Add</span>
+            </button>
+          )}
         </div>
       </div>
     </article>

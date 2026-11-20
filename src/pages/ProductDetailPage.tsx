@@ -14,6 +14,8 @@ import {
   Plus,
   Minus,
   ArrowLeft,
+  ExternalLink,
+  Info,
 } from 'lucide-react';
 import type { Product, Review } from '../types.ts';
 import { useStore } from '../context/StoreContext.tsx';
@@ -116,11 +118,22 @@ export function ProductDetailPage({ productId }: { productId: number }) {
     );
   }
 
+  const isAffiliate = product.product_type === 'aliexpress_affiliate';
   const availableVariantStock = getVariantStock(product, selectedSize, selectedColor);
-  const canBuy = availableVariantStock > 0 && product.status !== 'Out of Stock' && product.status !== 'Draft';
+  const canBuy = !isAffiliate && availableVariantStock > 0 && product.status !== 'Out of Stock' && product.status !== 'Draft';
   const isWishlisted = wishlist.includes(product.id);
   const isCompared = compareIds.includes(product.id);
   const activeImg = product.images[activeImageIdx] || product.images[0] || '';
+
+  const handleTrackAffiliateClick = () => {
+    const sid = localStorage.getItem('phb_visitor_sid') || '';
+    fetch(`/api/products/${product.id}/affiliate-click`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: sid, referrerPage: window.location.pathname }),
+      keepalive: true,
+    }).catch(() => {});
+  };
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -307,8 +320,8 @@ export function ProductDetailPage({ productId }: { productId: number }) {
             )}
           </div>
 
-          {/* Color Selector */}
-          {product.colors.length > 0 && (
+          {/* Color Selector (Direct Products Only) */}
+          {!isAffiliate && product.colors.length > 0 && (
             <div className="space-y-2.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-zinc-700 dark:text-zinc-300">Color</span>
@@ -340,8 +353,8 @@ export function ProductDetailPage({ productId }: { productId: number }) {
             </div>
           )}
 
-          {/* Size Selector */}
-          {product.sizes.length > 0 && (
+          {/* Size Selector (Direct Products Only) */}
+          {!isAffiliate && product.sizes.length > 0 && (
             <div className="space-y-2.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="font-semibold text-zinc-700 dark:text-zinc-300">Size</span>
@@ -376,64 +389,79 @@ export function ProductDetailPage({ productId }: { productId: number }) {
             </div>
           )}
 
-          {/* Quantity + Stock Alert */}
-          <div className="flex items-center justify-between gap-4 pt-1">
-            <div className="flex items-center border border-zinc-300 dark:border-zinc-700 rounded-lg">
-              <button
-                type="button"
-                disabled={!canBuy || quantity <= 1}
-                onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-                className="p-2.5 text-zinc-700 dark:text-zinc-300 disabled:opacity-30"
-              >
-                <Minus className="w-4 h-4" />
-              </button>
-              <span className="px-4 font-mono text-sm font-semibold tabular-nums text-zinc-950 dark:text-white">
-                {quantity}
-              </span>
-              <button
-                type="button"
-                disabled={!canBuy || quantity >= availableVariantStock}
-                onClick={() => setQuantity((q) => Math.min(availableVariantStock, q + 1))}
-                className="p-2.5 text-zinc-700 dark:text-zinc-300 disabled:opacity-30"
-              >
-                <Plus className="w-4 h-4" />
-              </button>
-            </div>
-
-            <p className="text-xs font-medium">
-              {canBuy ? (
-                <span className="text-[#0F6E56] dark:text-[#14B8A6] inline-flex items-center gap-1">
-                  <Check className="w-4 h-4" />
-                  Ready to ship ({availableVariantStock} available)
+          {/* Quantity + Stock Alert (Direct Products Only) */}
+          {!isAffiliate && (
+            <div className="flex items-center justify-between gap-4 pt-1">
+              <div className="flex items-center border border-zinc-300 dark:border-zinc-700 rounded-lg">
+                <button
+                  type="button"
+                  disabled={!canBuy || quantity <= 1}
+                  onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                  className="p-2.5 text-zinc-700 dark:text-zinc-300 disabled:opacity-30"
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+                <span className="px-4 font-mono text-sm font-semibold tabular-nums text-zinc-950 dark:text-white">
+                  {quantity}
                 </span>
-              ) : (
-                <span className="text-red-500">Out of stock for this selection</span>
-              )}
-            </p>
-          </div>
+                <button
+                  type="button"
+                  disabled={!canBuy || quantity >= availableVariantStock}
+                  onClick={() => setQuantity((q) => Math.min(availableVariantStock, q + 1))}
+                  className="p-2.5 text-zinc-700 dark:text-zinc-300 disabled:opacity-30"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
+
+              <p className="text-xs font-medium">
+                {canBuy ? (
+                  <span className="text-[#0F6E56] dark:text-[#14B8A6] inline-flex items-center gap-1">
+                    <Check className="w-4 h-4" />
+                    Ready to ship ({availableVariantStock} available)
+                  </span>
+                ) : (
+                  <span className="text-red-500">Out of stock for this selection</span>
+                )}
+              </p>
+            </div>
+          )}
 
           {/* Primary CTAs */}
           <div className="space-y-2.5 pt-2">
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                disabled={!canBuy}
-                onClick={() => addToCart(product, selectedSize, selectedColor, quantity)}
-                className="px-4 py-3 rounded-lg border border-[#0F6E56] dark:border-[#14B8A6] text-[#0F6E56] dark:text-[#14B8A6] hover:bg-[#0F6E56]/10 dark:hover:bg-[#14B8A6]/10 font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            {isAffiliate ? (
+              <a
+                href={product.affiliate_url || `/api/affiliate/go/${product.id}`}
+                target="_blank"
+                rel="noopener noreferrer sponsored"
+                onClick={handleTrackAffiliateClick}
+                className="w-full px-4 py-3.5 rounded-lg bg-orange-600 hover:bg-orange-700 text-white font-semibold text-sm flex items-center justify-center gap-2 transition-colors shadow-sm"
               >
-                <ShoppingBag className="w-4 h-4" />
-                <span>Add to Cart</span>
-              </button>
-              <button
-                type="button"
-                disabled={!canBuy}
-                onClick={handleBuyNow}
-                className="px-4 py-3 rounded-lg bg-[#0F6E56] hover:bg-[#0C5A46] dark:bg-[#14B8A6] dark:hover:bg-[#0D9488] text-white dark:text-zinc-950 font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                <Zap className="w-4 h-4" />
-                <span>Buy Now</span>
-              </button>
-            </div>
+                <span>Buy Now on Official AliExpress</span>
+                <ExternalLink className="w-4 h-4" />
+              </a>
+            ) : (
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  disabled={!canBuy}
+                  onClick={() => addToCart(product, selectedSize, selectedColor, quantity)}
+                  className="px-4 py-3 rounded-lg border border-[#0F6E56] dark:border-[#14B8A6] text-[#0F6E56] dark:text-[#14B8A6] hover:bg-[#0F6E56]/10 dark:hover:bg-[#14B8A6]/10 font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  <ShoppingBag className="w-4 h-4" />
+                  <span>Add to Cart</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!canBuy}
+                  onClick={handleBuyNow}
+                  className="px-4 py-3 rounded-lg bg-[#0F6E56] hover:bg-[#0C5A46] dark:bg-[#14B8A6] dark:hover:bg-[#0D9488] text-white dark:text-zinc-950 font-semibold text-sm flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Zap className="w-4 h-4" />
+                  <span>Buy Now</span>
+                </button>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -455,28 +483,46 @@ export function ProductDetailPage({ productId }: { productId: number }) {
             </div>
           </div>
 
-          {/* Delivery & Payment Methods */}
-          <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-2.5 text-xs text-zinc-600 dark:text-zinc-400">
-            <div className="flex items-start gap-2.5">
-              <Truck className="w-4 h-4 text-[#0F6E56] dark:text-[#14B8A6] shrink-0 mt-0.5" />
-              <div>
-                <p className="font-medium text-zinc-900 dark:text-zinc-200">
-                  Dhaka: {formatBDT(settings.delivery_charge_dhaka ?? 70)} · Outside Dhaka:{' '}
-                  {formatBDT(settings.delivery_charge_outside ?? 130)}
+          {/* Delivery & Payment Methods OR Affiliate Disclosure */}
+          {isAffiliate ? (
+            <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-2.5 text-xs text-zinc-600 dark:text-zinc-400">
+              <div className="p-3.5 rounded-xl bg-orange-500/10 border border-orange-500/25 space-y-1.5">
+                <p className="font-semibold text-zinc-950 dark:text-white flex items-center gap-1.5">
+                  <Info className="w-4 h-4 text-orange-500 shrink-0" />
+                  <span>AliExpress Affiliate Partner Notice</span>
                 </p>
-                {Number(settings.free_delivery_threshold ?? 5000) > 0 && (
-                  <p>Free nationwide delivery on orders over {formatBDT(settings.free_delivery_threshold ?? 5000)}.</p>
-                )}
+                <p className="leading-relaxed">
+                  {settings.aliexpress_disclosure ||
+                    'Affiliate Disclosure: As an AliExpress Affiliate, PRODUCT HUB BD may earn a commission from qualifying purchases made through links on this site at no extra cost to you.'}
+                </p>
+                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                  Clicking &ldquo;Buy Now&rdquo; redirects you to the official AliExpress product page. PRODUCT HUB BD does not collect your delivery address or payment details for AliExpress purchases.
+                </p>
               </div>
             </div>
-            <div className="flex items-start gap-2.5">
-              <ShieldCheck className="w-4 h-4 text-[#0F6E56] dark:text-[#14B8A6] shrink-0 mt-0.5" />
-              <p>
-                Accepted payments: bKash (Send Money), Nagad (Send Money)
-                {settings.cod_enabled === 'true' ? ', and Cash on Delivery' : ''}.
-              </p>
+          ) : (
+            <div className="pt-4 border-t border-zinc-200 dark:border-zinc-800 space-y-2.5 text-xs text-zinc-600 dark:text-zinc-400">
+              <div className="flex items-start gap-2.5">
+                <Truck className="w-4 h-4 text-[#0F6E56] dark:text-[#14B8A6] shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-medium text-zinc-900 dark:text-zinc-200">
+                    Dhaka: {formatBDT(settings.delivery_charge_dhaka ?? 70)} · Outside Dhaka:{' '}
+                    {formatBDT(settings.delivery_charge_outside ?? 130)}
+                  </p>
+                  {Number(settings.free_delivery_threshold ?? 5000) > 0 && (
+                    <p>Free nationwide delivery on orders over {formatBDT(settings.free_delivery_threshold ?? 5000)}.</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-start gap-2.5">
+                <ShieldCheck className="w-4 h-4 text-[#0F6E56] dark:text-[#14B8A6] shrink-0 mt-0.5" />
+                <p>
+                  Accepted payments: bKash (Send Money), Nagad (Send Money)
+                  {settings.cod_enabled === 'true' ? ', and Cash on Delivery' : ''}.
+                </p>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 

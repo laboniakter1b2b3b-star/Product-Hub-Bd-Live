@@ -1,5 +1,6 @@
 import React from 'react';
 import { StoreProvider, useStore } from './context/StoreContext.tsx';
+import { LanguageProvider } from './context/LanguageContext.tsx';
 import { Navbar } from './components/Navbar.tsx';
 import { Footer } from './components/Footer.tsx';
 import { CartDrawer } from './components/CartDrawer.tsx';
@@ -129,10 +130,19 @@ function AppRouter() {
   );
 }
 
+function AppWithLanguage() {
+  const { settings } = useStore();
+  return (
+    <LanguageProvider defaultSiteLanguage={settings.default_language}>
+      <AppRouter />
+    </LanguageProvider>
+  );
+}
+
 export default function App() {
   return (
     <StoreProvider>
-      <AppRouter />
+      <AppWithLanguage />
     </StoreProvider>
   );
 }

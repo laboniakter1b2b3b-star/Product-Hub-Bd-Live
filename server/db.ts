@@ -273,6 +273,26 @@ export function initDatabase(): void {
       details TEXT DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS translation_cache (
+      cache_key TEXT PRIMARY KEY,
+      target_lang TEXT NOT NULL,
+      source_text TEXT NOT NULL,
+      translated_text TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS affiliate_clicks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_id INTEGER NOT NULL,
+      product_name TEXT NOT NULL,
+      sku TEXT NOT NULL,
+      affiliate_url TEXT NOT NULL,
+      session_id TEXT DEFAULT '',
+      referrer_page TEXT DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    );
   `);
 
   // Ensure new product columns exist on existing databases
@@ -283,6 +303,31 @@ export function initDatabase(): void {
   }
   if (!colNames.has('warranty_info')) {
     db.exec("ALTER TABLE products ADD COLUMN warranty_info TEXT DEFAULT ''");
+  }
+  if (!colNames.has('product_type')) {
+    db.exec("ALTER TABLE products ADD COLUMN product_type TEXT NOT NULL DEFAULT 'direct'");
+  }
+  if (!colNames.has('affiliate_url')) {
+    db.exec("ALTER TABLE products ADD COLUMN affiliate_url TEXT DEFAULT ''");
+  }
+  if (!colNames.has('affiliate_clicks')) {
+    db.exec("ALTER TABLE products ADD COLUMN affiliate_clicks INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!colNames.has('affiliate_commission_rate')) {
+    db.exec('ALTER TABLE products ADD COLUMN affiliate_commission_rate REAL DEFAULT NULL');
+  }
+  if (!colNames.has('affiliate_reported_orders')) {
+    db.exec("ALTER TABLE products ADD COLUMN affiliate_reported_orders INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!colNames.has('affiliate_reported_commission')) {
+    db.exec("ALTER TABLE products ADD COLUMN affiliate_reported_commission REAL NOT NULL DEFAULT 0");
+  }
+
+  // Ensure new order columns exist on existing databases
+  const orderCols = db.prepare('PRAGMA table_info(orders)').all() as { name: string }[];
+  const orderColNames = new Set(orderCols.map((c) => c.name));
+  if (!orderColNames.has('actual_delivery_cost')) {
+    db.exec('ALTER TABLE orders ADD COLUMN actual_delivery_cost REAL NOT NULL DEFAULT 0');
   }
 
   // Seed admin user Robiul (password: Mnbv1234)
@@ -304,6 +349,7 @@ export function initDatabase(): void {
   const defaultSettings: Record<string, string> = {
     site_name: 'PRODUCT HUB BD',
     site_tagline: 'Curated Essentials for Modern Living',
+    default_language: 'auto',
     site_logo: '',
     favicon_url: '',
     hero_banner: '/src/assets/images/hero_flagship_banner_1795097542425.jpg',
@@ -336,14 +382,21 @@ export function initDatabase(): void {
     about_content:
       'Founded in Dhaka, PRODUCT HUB BD brings together architectural apparel, precision-crafted watches, full-grain leather goods, and refined personal audio. Every item is inspected in our Banani studio before dispatch across all 64 districts of Bangladesh.',
     privacy_policy:
-      'PRODUCT HUB BD respects your privacy. Personal details including name, phone, email, and delivery address are used strictly to process orders, verify manual bKash/Nagad payments, and provide delivery updates. We never store or request your mobile wallet PIN, password, or OTP.',
+      'PRODUCT HUB BD respects your privacy. For direct store orders, only necessary details (name, phone, delivery address, and optional email) are used strictly to process orders, verify manual bKash/Nagad payments, and provide delivery updates. We never store payment card details or request wallet PINs/OTPs. For AliExpress Affiliate items, clicking Buy Now redirects directly to AliExpress and no delivery address is collected on our site.',
     terms_conditions:
-      'All prices are listed in Bangladeshi Taka (BDT). Orders placed via manual bKash or Nagad Send Money enter Pending Verification until our team confirms the Transaction ID. Stock is reserved upon order placement and automatically restored if an order is cancelled before dispatch.',
+      'All direct store prices are listed in Bangladeshi Taka (BDT). Orders placed via manual bKash or Nagad Send Money enter Pending Verification until our team confirms the Transaction ID. Stock is reserved upon order placement and automatically restored if an order is cancelled before dispatch. AliExpress affiliate products are fulfilled and priced directly on AliExpress.',
     shipping_policy:
       'Inside Dhaka deliveries arrive within 24–48 hours (৳70 flat rate). Outside Dhaka nationwide courier deliveries arrive within 2–4 business days (৳130 flat rate). Orders above ৳5,000 qualify for complimentary delivery across Bangladesh.',
     return_policy:
       'Items may be returned or exchanged within 7 days of delivery provided tags, original packaging, and unworn condition are intact. Refunds for verified bKash/Nagad orders are processed back to the sender wallet within 48 hours of return inspection.',
     footer_text: 'Precision essentials curated in Dhaka, delivered nationwide across all 64 districts.',
+    aliexpress_enabled: 'true',
+    aliexpress_account_name: 'PRODUCT HUB BD AliExpress Affiliate',
+    aliexpress_tracking_id: '',
+    aliexpress_app_key: '',
+    aliexpress_commission_rate: '',
+    aliexpress_disclosure:
+      'Affiliate Disclosure: PRODUCT HUB BD participates in the AliExpress Affiliate Program. Clicking Buy Now redirects you to the official AliExpress product page, and we may earn a qualifying commission at no extra cost to you. No delivery address or payment details are collected here for AliExpress items.',
   };
 
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');

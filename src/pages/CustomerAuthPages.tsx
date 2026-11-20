@@ -651,15 +651,19 @@ export function ComparePage() {
                 <th className="p-4 text-xs font-semibold text-zinc-500">Available Sizes</th>
                 {items.map((p) => (
                   <td key={p.id} className="p-4 font-mono text-xs">
-                    {p.sizes.join(', ')}
+                    {p.product_type === 'aliexpress_affiliate' ? 'On AliExpress' : p.sizes.join(', ')}
                   </td>
                 ))}
               </tr>
               <tr>
-                <th className="p-4 text-xs font-semibold text-zinc-500">Stock</th>
+                <th className="p-4 text-xs font-semibold text-zinc-500">Availability</th>
                 {items.map((p) => (
                   <td key={p.id} className="p-4 font-mono text-xs tabular-nums">
-                    {p.stock_quantity > 0 ? `${p.stock_quantity} available` : 'Out of stock'}
+                    {p.product_type === 'aliexpress_affiliate'
+                      ? 'Official AliExpress link'
+                      : p.stock_quantity > 0
+                        ? `${p.stock_quantity} available`
+                        : 'Out of stock'}
                   </td>
                 ))}
               </tr>
@@ -924,7 +928,8 @@ export function TrackOrderPage() {
             <div>
               <p className="font-mono text-lg font-bold text-zinc-950 dark:text-white">{result.order_id}</p>
               <p className="text-xs text-zinc-500 mt-0.5">
-                {result.customer_name} · {result.area}, {result.district}
+                {result.customer_name}
+                {result.area ? ` · ${result.area}` : ''} · {result.district}
               </p>
             </div>
             <div className="text-right text-xs">
