@@ -1,0 +1,8 @@
+{
+  "name": "Product Hub BD",
+  "description": "Modern full-stack e-commerce platform for curated apparel, timepieces, footwear, and everyday carry in Bangladesh with manual bKash, Nagad, and Cash on Delivery checkout.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
