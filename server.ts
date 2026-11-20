@@ -2965,21 +2965,32 @@ app.post('/api/admin/restore', requireAdmin, async (req: AuthedRequest, res: Res
   }
 });
 
+function getPublicBaseUrl(req: Request): string {
+  const protoHeader = req.headers['x-forwarded-proto'];
+  const proto = (Array.isArray(protoHeader) ? protoHeader[0] : protoHeader)?.split(',')[0]?.trim() || req.protocol;
+  const hostHeader = req.headers['x-forwarded-host'];
+  const host = (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader)?.split(',')[0]?.trim() || req.get('host');
+  if (host) {
+    return `${proto}://${host}`.replace(/\/+$/, '');
+  }
+  return (process.env.APP_URL || '').replace(/\/+$/, '');
+}
+
 app.get('/robots.txt', (req: Request, res: Response) => {
-  const baseUrl = process.env.APP_URL || `${req.protocol}://${req.get('host')}`;
+  const baseUrl = getPublicBaseUrl(req);
   res.type('text/plain').send(
     [
       'User-agent: *',
       'Allow: /',
       'Disallow: /admin',
       'Disallow: /api/',
-      `Sitemap: ${baseUrl.replace(/\/+$/, '')}/sitemap.xml`,
+      `Sitemap: ${baseUrl}/sitemap.xml`,
     ].join('\n')
   );
 });
 
 app.get('/sitemap.xml', (req: Request, res: Response) => {
-  const baseUrl = (process.env.APP_URL || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+  const baseUrl = getPublicBaseUrl(req);
   const staticPaths = ['/', '/shop', '/categories', '/track-order', '/about', '/contact', '/faq'];
   const activeProducts = db
     .prepare("SELECT id, updated_at FROM products WHERE status != 'Draft' ORDER BY id DESC")
