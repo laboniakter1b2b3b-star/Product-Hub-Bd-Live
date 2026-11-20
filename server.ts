@@ -2634,6 +2634,7 @@ app.get('/api/admin/full-website-archive', requireAdmin, async (req: AuthedReque
         '.env.example',
         'Dockerfile',
         'render.yaml',
+        '.npmrc',
       ]) {
         const fp = path.join(rootDir, rootFile);
         if (fs.existsSync(fp) && fs.statSync(fp).isFile()) {
